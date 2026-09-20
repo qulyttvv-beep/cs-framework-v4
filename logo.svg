@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-120 -120 240 240"
+     width="512" height="512" role="img" aria-label="CS Framework">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#00d4ff"/>
+      <stop offset="50%"  stop-color="#5b8fff"/>
+      <stop offset="100%" stop-color="#ff44cc"/>
+    </linearGradient>
+    <radialGradient id="bg" cx="0.5" cy="0.5" r="0.7">
+      <stop offset="0%"   stop-color="#0b1220" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#0b1220" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- soft background glow -->
+  <circle cx="0" cy="0" r="110" fill="url(#bg)"/>
+
+  <g fill="none" stroke="url(#g)" stroke-width="6"
+     stroke-linejoin="round" stroke-linecap="round">
+
+    <!-- outer hexagon: vertices at 12, 2, 4, 6, 8, 10 o'clock -->
+    <!-- R = 100, R*cos(30deg) ~= 86.6, R/2 = 50 -->
+    <polygon points="0,-100 86.6,-50 86.6,50 0,100 -86.6,50 -86.6,-50"/>
+
+    <!-- inner cube edges: center to top-right, top-left, bottom -->
+    <line x1="0" y1="0" x2="86.6"  y2="-50"/>
+    <line x1="0" y1="0" x2="-86.6" y2="-50"/>
+    <line x1="0" y1="0" x2="0"     y2="100"/>
+
+  </g>
+</svg>
