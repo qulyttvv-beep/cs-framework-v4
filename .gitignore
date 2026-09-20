@@ -45,3 +45,5 @@ desktop.ini
 
 *.log
 
+
+.aider.tags.cache*
