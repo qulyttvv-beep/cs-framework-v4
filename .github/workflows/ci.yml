@@ -50,3 +50,8 @@ jobs:
         env:
           CS_NO_COLOR: "1"
         run: python -m pytest -ra -v --durations=10
+
+  package:
+    # builds + runs the installers (Windows setup, macOS .dmg) and cs binaries
+    if: github.event_name != 'push'
+    uses: ./.github/workflows/package.yml

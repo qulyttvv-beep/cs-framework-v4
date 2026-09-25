@@ -302,6 +302,51 @@ svg.i.lg { width: 22px; height: 22px; }
 .demo-note { margin-top: 18px; font-size: 13px; color: var(--text-3); text-align: center; max-width: 560px; }
 .demo-note a { cursor: pointer; }
 
+/* first launch: how should Spark X think */
+.onboard { margin-top: 26px; width: 100%; max-width: 760px; animation: rise .35s var(--ease) both; }
+.onboard-title { font-size: 13px; color: var(--text-3); text-align: center; margin-bottom: 12px; }
+.onboard-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.ob-card { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; text-align: left; padding: 14px 16px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px; color: var(--text-2);
+  transition: border-color .15s, background .15s; }
+.ob-card:hover { border-color: var(--line-2); background: var(--surface-2); }
+.ob-card b { color: var(--text); font-weight: 600; font-size: 14px; }
+.ob-card span { font-size: 12.5px; line-height: 1.45; }
+.ob-card svg { width: 18px; height: 18px; color: var(--text-3); }
+.ob-card.primary { border-color: var(--accent); }
+.ob-card.primary svg { color: var(--accent); }
+.ob-card:disabled { opacity: .7; cursor: progress; }
+@media (max-width: 760px) { .onboard-grid { grid-template-columns: 1fr; } }
+
+/* a model's visible reasoning */
+.think { margin: 4px 0 10px; border-left: 2px solid var(--line-2); padding: 2px 0 2px 12px; }
+.think summary { cursor: pointer; font: 500 12.5px var(--sans); color: var(--text-3); list-style: none; }
+.think summary::-webkit-details-marker { display: none; }
+.think[open] summary { margin-bottom: 6px; }
+.think div { font: 13px/1.55 var(--sans); color: var(--text-3); white-space: pre-wrap; max-height: 260px; overflow: auto; }
+
+/* free services, Ollama models, suggestions */
+.free-status { margin-top: 8px; }
+.fs-row, .ol-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; }
+.fs-row .muted { font-size: 12.5px; }
+.ol-list { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 6px; }
+.ol-row { border-bottom: 1px solid var(--line); }
+.ol-row:last-child { border-bottom: 0; }
+.ol-row .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ol-row b { font-weight: 500; }
+.ol-row .badge { margin-left: 4px; }
+.mcard { margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.mcard.dim { opacity: .55; }
+.mc-head { display: flex; align-items: baseline; gap: 8px; }
+.mc-head h4 { margin: 0; }
+.mc-head .muted { font-size: 12px; }
+.mc-badges { display: flex; flex-wrap: wrap; gap: 4px; min-height: 18px; }
+.mc-blurb { font-size: 13px; line-height: 1.45; flex: 1; }
+.mc-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mc-foot code { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-foot .bar { flex: 1; margin: 0; }
+.spin.sm { width: 11px; height: 11px; display: inline-block; vertical-align: -1px; }
+
 /* ---------- popovers / modals / toasts ---------- */
 .pop { position: fixed; z-index: 60; background: var(--surface); border: 1px solid var(--line-2); border-radius: 14px;
        box-shadow: var(--shadow); padding: 6px; min-width: 240px; max-width: 380px; animation: pop .16s var(--ease) both; }
@@ -502,3 +547,9 @@ svg.i.lg { width: 22px; height: 22px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001s !important; transition-duration: .001s !important; }
 }
+
+/* tool steps: code arguments and screenshot thumbnails */
+.tool-body pre.code-arg { max-height: 320px; overflow: auto; }
+.tool-row .thumb { height: 26px; width: auto; max-width: 64px; border-radius: 5px; border: 1px solid var(--line-2);
+  object-fit: cover; margin-left: auto; }
+.tool-row .thumb + .chev { margin-left: 8px; }
