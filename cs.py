@@ -43,8 +43,8 @@ import pathlib
 
 APP       = "cs"
 APP_LONG  = "CS Framework"
-VERSION   = "4.1.0"
-CODENAME  = "hex-4.1"
+VERSION   = "4.2.0"
+CODENAME  = "studio-4.2"
 
 
 # --- forced constants (repair patch) ---
@@ -199,6 +199,7 @@ def build_cli():
     rm = sub.add_parser("rm"); rm.add_argument("model")
     ct = sub.add_parser("ctx"); ct.add_argument("model")
     sv = sub.add_parser("serve"); sv.add_argument("--host", default="127.0.0.1"); sv.add_argument("--port", type=int, default=8686); sv.add_argument("--model", default=None)
+    apc = sub.add_parser("studio"); apc.add_argument("--host", default="127.0.0.1"); apc.add_argument("--port", type=int, default=8799); apc.add_argument("--model", default=None); apc.add_argument("--no-open", action="store_true")
     ag = sub.add_parser("agents"); ag.add_argument("action", nargs="?", default="list", choices=["list","install","launch"]); ag.add_argument("agent", nargs="?"); ag.add_argument("--model", default=None)
     pi = sub.add_parser("plugin-init"); pi.add_argument("name")
     cl = sub.add_parser("clean"); cl.add_argument("--downloads", action="store_true")
@@ -3446,10 +3447,11 @@ def _handle_anthropic_messages(handler):
             "model": rec.name, "content":[{"type":"text","text":txt}],
             "stop_reason":"end_turn", "stop_sequence": None,
             "usage": {"input_tokens":0, "output_tokens": max(1, len(txt)//4)}}); return
+    handler.close_connection = True
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream")
     handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("Connection", "keep-alive")
+    handler.send_header("Connection", "close")
     handler.end_headers()
     def sse(ev, data):
         handler.wfile.write(("event: " + ev + "\n").encode())
@@ -3507,11 +3509,22 @@ class _ServeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b)))
         self.end_headers(); self.wfile.write(b)
 
+    def _html(self, code, s):
+        b = s.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers(); self.wfile.write(b)
+
     def _sse(self):
+        # No Content-Length is possible for a stream, so we must close the
+        # connection at the end to give the client a clean EOF (browsers and
+        # read-to-end clients both rely on this).
+        self.close_connection = True
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
         self.end_headers()
 
     def do_GET(self):
@@ -3521,10 +3534,21 @@ class _ServeHandler(BaseHTTPRequestHandler):
                              "data":[{"id":r.name,"object":"model"} for r in recs]})
         elif self.path == "/health":
             self._json(200, {"ok":True,"version":VERSION})
+        elif self.path == "/" or self.path == "/index.html" or self.path.startswith("/app"):
+            self._html(200, APP_HTML)
+        elif self.path.startswith("/api/"):
+            _app_get(self)
         else:
             self._json(404, {"error":"not found"})
 
     def do_POST(self):
+        if self.path.startswith("/api/"):
+            try:
+                ln = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(ln) or b"{}") if ln else {}
+            except Exception as e:
+                self._json(400, {"error": str(e)}); return
+            return _app_post(self, self.path.split("?")[0], body)
         if self.path.startswith("/v1/messages"):
             return _handle_anthropic_messages(self)
         if not self.path.startswith(("/v1/chat/completions","/v1/completions")):
@@ -3578,6 +3602,1015 @@ def cmd_serve(host, port, model=None):
     try: srv.serve_forever()
     except KeyboardInterrupt: print(YL + "  ⌁ stopped" + RSTC)
     finally: srv.server_close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  CS App — a Claude-desktop-style graphical app, served by the framework
+#  (chat · artifacts · MCP tools · routines · models · custom runtimes)
+# ═══════════════════════════════════════════════════════════════════════════
+APP_D          = DATA_HOME / "app"
+APP_CHATS_D    = APP_D / "chats"
+APP_ROUTINES_P = APP_D / "routines.json"
+APP_MCP_P      = APP_D / "mcp.json"
+DEMO_MODEL_ID  = "cs-echo"
+
+
+def _app_dirs():
+    for d in (APP_D, APP_CHATS_D):
+        try: d.mkdir(parents=True, exist_ok=True)
+        except Exception: pass
+
+
+def _model_info_list():
+    out = []
+    try:
+        for r in load_scan():
+            rt = None
+            try: rt = pick_runtime(r)
+            except Exception: pass
+            arch = getattr(r, "arch", "") or ""
+            out.append({"id": r.name, "name": r.name, "kind": r.kind,
+                        "arch": arch_disp(arch) if arch else "",
+                        "size": human(getattr(r, "size", 0) or 0),
+                        "runtime": getattr(rt, "id", "") if rt else "",
+                        "local": True})
+    except Exception as e:
+        log(f"model_info: {e}", "warn")
+    for r in platform_records():
+        out.append({"id": r.name, "name": r.name, "kind": "api", "arch": "",
+                    "size": "", "runtime": "openai-compat", "local": False})
+    out.append({"id": DEMO_MODEL_ID, "name": "CS Echo (built-in demo)",
+                "kind": "demo", "arch": "", "size": "", "runtime": "builtin",
+                "local": True})
+    return out
+
+
+def _runtime_info_list():
+    out = []
+    for rt in all_runtimes():
+        try: ok, detail = rt.available()
+        except Exception as e: ok, detail = False, str(e)
+        out.append({"id": getattr(rt, "id", rt.__class__.__name__),
+                    "ok": bool(ok), "detail": detail or ""})
+    return out
+
+
+# ---- chat / routine / mcp stores ----
+def _routines_load(): return jload(APP_ROUTINES_P, [])
+def _routines_save(x): jsave(APP_ROUTINES_P, x)
+def _mcp_cfg_load(): return jload(APP_MCP_P, {"servers": []})
+def _mcp_cfg_save(c): jsave(APP_MCP_P, c)
+
+def _chats_list():
+    _app_dirs(); out = []
+    for p in sorted(APP_CHATS_D.glob("*.json"),
+                    key=lambda x: x.stat().st_mtime, reverse=True):
+        d = jload(p, {})
+        out.append({"id": d.get("id", p.stem), "title": d.get("title", "(untitled)"),
+                    "model": d.get("model", ""), "updated": p.stat().st_mtime,
+                    "n": len(d.get("messages", []))})
+    return out
+def _chat_load(cid):
+    _app_dirs(); return jload(APP_CHATS_D / (str(cid) + ".json"), None)
+def _chat_save(chat):
+    _app_dirs(); jsave(APP_CHATS_D / (str(chat["id"]) + ".json"), chat)
+def _chat_delete(cid):
+    try: (APP_CHATS_D / (str(cid) + ".json")).unlink()
+    except Exception: pass
+
+
+# ---- minimal MCP stdio client (newline-delimited JSON-RPC 2.0) ----
+class MCPClient:
+    def __init__(self, command, args=None, env=None):
+        self.command = command; self.args = list(args or [])
+        self.env = dict(env or {}); self.proc = None
+        self._id = 0; self._lock = threading.Lock(); self.tools = []
+
+    def start(self, timeout=20):
+        e = os.environ.copy(); e.update(self.env)
+        self.proc = subprocess.Popen(
+            [self.command, *self.args], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=e, text=True, bufsize=1)
+        self._rpc("initialize", {"protocolVersion": "2024-11-05",
+            "capabilities": {}, "clientInfo": {"name": "cs-framework",
+            "version": VERSION}}, timeout=timeout)
+        self._notify("notifications/initialized")
+        res = self._rpc("tools/list", {}, timeout=timeout) or {}
+        self.tools = res.get("tools", [])
+        return self.tools
+
+    def _write(self, obj):
+        self.proc.stdin.write(json.dumps(obj) + "\n"); self.proc.stdin.flush()
+
+    def _notify(self, method, params=None):
+        self._write({"jsonrpc": "2.0", "method": method, "params": params or {}})
+
+    def _rpc(self, method, params=None, timeout=30):
+        with self._lock:
+            self._id += 1; rid = self._id
+            self._write({"jsonrpc": "2.0", "id": rid, "method": method,
+                         "params": params or {}})
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                line = self.proc.stdout.readline()
+                if not line:
+                    if self.proc.poll() is not None:
+                        raise RuntimeError("mcp server exited")
+                    continue
+                try: msg = json.loads(line)
+                except Exception: continue
+                if msg.get("id") == rid:
+                    if "error" in msg: raise RuntimeError(str(msg["error"]))
+                    return msg.get("result")
+            raise TimeoutError("mcp timeout: " + method)
+
+    def call_tool(self, name, arguments, timeout=120):
+        res = self._rpc("tools/call", {"name": name,
+                        "arguments": arguments or {}}, timeout=timeout) or {}
+        parts = []
+        for c in res.get("content", []):
+            parts.append(c.get("text", "") if c.get("type") == "text"
+                         else json.dumps(c))
+        return "\n".join(parts) if parts else json.dumps(res)
+
+    def stop(self):
+        try:
+            if self.proc: self.proc.terminate()
+        except Exception: pass
+
+
+_MCP_CLIENTS = {}
+
+def _mcp_get_client(server):
+    sid = server.get("id")
+    cl = _MCP_CLIENTS.get(sid)
+    if cl and cl.proc and cl.proc.poll() is None:
+        return cl
+    cl = MCPClient(server.get("command"), server.get("args"), server.get("env"))
+    cl.start(); _MCP_CLIENTS[sid] = cl
+    return cl
+
+def _mcp_all_tools(server_ids=None):
+    cfg = _mcp_cfg_load(); tools = []
+    for s in cfg.get("servers", []):
+        if server_ids is not None and s.get("id") not in server_ids: continue
+        if server_ids is None and not s.get("enabled", True): continue
+        try:
+            cl = _mcp_get_client(s)
+            for t in cl.tools:
+                tools.append({"server": s.get("id"), "name": t.get("name"),
+                              "description": t.get("description", ""),
+                              "schema": t.get("inputSchema", {})})
+        except Exception as e:
+            log(f"mcp {s.get('id')}: {e}", "warn")
+    return tools
+
+def _mcp_exec(name, args, mcp_tools):
+    for t in mcp_tools:
+        if t["name"] == name:
+            cfg = _mcp_cfg_load()
+            srv = next((s for s in cfg.get("servers", [])
+                        if s.get("id") == t["server"]), None)
+            if not srv: return "[mcp server gone]"
+            return _mcp_get_client(srv).call_tool(name, args)
+    return None
+
+
+def _app_exec_tool(name, args, cwd, mcp_tools):
+    mres = _mcp_exec(name, args, mcp_tools)
+    if mres is not None:
+        return mres
+    fn = TOOLS_IMPL.get(name)
+    if not fn:
+        return "[unknown tool: " + str(name) + "]"
+    try:
+        return str(fn(args, cwd=cwd))
+    except Exception as e:
+        return "[tool error: " + str(e) + "]"
+
+
+# ---- built-in demo model so chat works with zero models installed ----
+def _demo_stream(messages):
+    last = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last = m.get("content", ""); break
+    reply = ("Hi — I'm **CS Echo**, the built-in demo model. I don't run a "
+             "neural net; I echo so you can try the app right away.\n\n"
+             "You said:\n\n> " + (last or "(nothing yet)") + "\n\n"
+             "To chat with a real model: `cs pull <hf-repo>` to download one, "
+             "or `cs connect <platform>` for an API — then pick it from the "
+             "model menu at the top.")
+    for tok in re.findall(r"\s+|\S+", reply):
+        yield tok
+
+
+def _app_chat_stream(handler, body):
+    model = body.get("model") or DEMO_MODEL_ID
+    messages = list(body.get("messages", []))
+    use_tools = bool(body.get("tools", False))
+    mcp_ids = body.get("mcp") or None
+    cwd = body.get("cwd") or str(Path.cwd())
+    handler._sse()
+
+    def send(ev):
+        handler.wfile.write(b"data: " + json.dumps(ev).encode() + b"\n\n")
+        handler.wfile.flush()
+
+    try:
+        if model == DEMO_MODEL_ID:
+            for tok in _demo_stream(messages):
+                send({"type": "token", "text": tok}); time.sleep(0.004)
+            send({"type": "done"}); return
+
+        rec = match_model(model)
+        if not rec:
+            send({"type": "error", "error": "model not found: " + str(model)})
+            send({"type": "done"}); return
+        rt = pick_runtime(rec)
+        if not rt:
+            send({"type": "error", "error": "no runtime available for " + rec.name})
+            send({"type": "done"}); return
+        ctx = dict(get_context(rec))
+        mcp_tools = _mcp_all_tools(mcp_ids) if use_tools else []
+        if use_tools:
+            extra = TOOLS_HEADER
+            if mcp_tools:
+                extra += "\nMCP tools:\n" + "\n".join(
+                    "- " + t["name"] + ": " + (t.get("description") or "")
+                    for t in mcp_tools)
+            ctx["system"] = ((ctx.get("system") or "") + "\n\n" + extra).strip()
+
+        hist = [m for m in messages if m.get("role") in ("user", "assistant", "system")]
+        rounds = 0
+        while rounds < MAX_TOOL_ROUNDS:
+            rounds += 1
+            prompt = build_prompt(hist, ctx)
+            buf = []
+            for c in rt.stream(rec, prompt, hist, ctx):
+                buf.append(c); send({"type": "token", "text": c})
+            text = "".join(buf)
+            hist.append({"role": "assistant", "content": text})
+            if not use_tools:
+                break
+            calls = _TOOL_RX.findall(text)
+            if not calls:
+                break
+            did = False
+            for raw in calls:
+                try: call = json.loads(raw)
+                except Exception: continue
+                name = call.get("name"); args = call.get("args", {}) or {}
+                send({"type": "tool_call", "name": name, "args": args})
+                result = _app_exec_tool(name, args, cwd, mcp_tools)
+                result = str(result)[:MAX_TOOL_OUTPUT]
+                did = True
+                send({"type": "tool_result", "name": name, "result": result})
+                hist.append({"role": "user",
+                             "content": "<tool_result>" + result + "</tool_result>"})
+            if not did:
+                break
+        send({"type": "done"})
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    except Exception as e:
+        try: send({"type": "error", "error": str(e)}); send({"type": "done"})
+        except Exception: pass
+
+
+# ---- routines scheduler ----
+_APP_SCHED = {"stop": False, "thread": None}
+
+def _routine_due(r, now):
+    if not r.get("enabled", True): return False
+    last = r.get("last_run") or 0
+    every = r.get("every_minutes")
+    if every:
+        try: return (now - last) >= float(every) * 60
+        except Exception: return False
+    at = r.get("at_time")
+    if at and ":" in at:
+        lt = _dt.datetime.fromtimestamp(now)
+        try: hh, mm = [int(x) for x in at.split(":")[:2]]
+        except Exception: return False
+        if lt.hour == hh and lt.minute == mm and (now - last) > 55:
+            return True
+    return False
+
+def _routine_run(r):
+    model = r.get("model") or DEMO_MODEL_ID
+    prompt = r.get("prompt", "")
+    out = []
+    try:
+        if model == DEMO_MODEL_ID:
+            out = list(_demo_stream([{"role": "user", "content": prompt}]))
+        else:
+            rec = match_model(model); rt = pick_runtime(rec) if rec else None
+            if rec and rt:
+                ctx = get_context(rec)
+                hist = [{"role": "user", "content": prompt}]
+                for c in rt.stream(rec, build_prompt(hist, ctx), hist, ctx):
+                    out.append(c)
+            else:
+                out = ["[model unavailable]"]
+    except Exception as e:
+        out = ["[error: " + str(e) + "]"]
+    r["last_run"] = time.time(); r["last_output"] = "".join(out)[:4000]
+    return r["last_output"]
+
+def _sched_loop():
+    while not _APP_SCHED["stop"]:
+        try:
+            items = _routines_load(); now = time.time(); changed = False
+            for r in items:
+                if _routine_due(r, now):
+                    log(f"routine run: {r.get('name')}"); _routine_run(r); changed = True
+            if changed: _routines_save(items)
+        except Exception as e:
+            log(f"sched: {e}", "warn")
+        for _ in range(30):
+            if _APP_SCHED["stop"]: break
+            time.sleep(1)
+
+def _start_scheduler():
+    if _APP_SCHED["thread"]: return
+    _APP_SCHED["stop"] = False
+    t = threading.Thread(target=_sched_loop, daemon=True); t.start()
+    _APP_SCHED["thread"] = t
+
+
+# ---- JSON API dispatch ----
+def _app_get(handler):
+    u = urllib.parse.urlparse(handler.path); path = u.path
+    q = urllib.parse.parse_qs(u.query)
+    if path == "/api/state":
+        handler._json(200, {
+            "version": VERSION, "codename": CODENAME, "app": APP_LONG,
+            "models": _model_info_list(), "runtimes": _runtime_info_list(),
+            "platforms": [{"id": k, "base_url": v.get("base_url", ""),
+                           "connected": True} for k, v in CFG.get("platforms", {}).items()],
+            "connectable": sorted(PLATFORM_DEFS.keys()),
+            "prefs": CFG.get("prefs", {}), "cwd": str(Path.cwd()),
+            "demo_model": DEMO_MODEL_ID}); return
+    if path == "/api/models":
+        handler._json(200, {"models": _model_info_list()}); return
+    if path == "/api/runtimes":
+        handler._json(200, {"runtimes": _runtime_info_list()}); return
+    if path == "/api/context":
+        rec = match_model((q.get("model") or [""])[0])
+        if not rec: handler._json(404, {"error": "model not found"}); return
+        handler._json(200, {"model": rec.name, "context": get_context(rec)}); return
+    if path == "/api/routines":
+        handler._json(200, {"routines": _routines_load()}); return
+    if path == "/api/mcp":
+        handler._json(200, _mcp_cfg_load()); return
+    if path == "/api/chats":
+        handler._json(200, {"chats": _chats_list()}); return
+    if path.startswith("/api/chats/"):
+        handler._json(200, _chat_load(path.rsplit("/", 1)[-1]) or {"error": "not found"})
+        return
+    handler._json(404, {"error": "not found"})
+
+
+def _app_post(handler, path, body):
+    if path == "/api/chat":
+        return _app_chat_stream(handler, body)
+    if path == "/api/context":
+        rec = match_model(body.get("model"))
+        if not rec: handler._json(404, {"error": "model not found"}); return
+        ctx = get_context(rec); ctx.update(body.get("context", {})); set_context(rec, ctx)
+        handler._json(200, {"ok": True, "context": ctx}); return
+    if path == "/api/routines":
+        items = _routines_load(); r = body.get("routine", {})
+        if not r.get("id"): r["id"] = uuid.uuid4().hex[:8]
+        items = [x for x in items if x.get("id") != r["id"]] + [r]
+        _routines_save(items); handler._json(200, {"ok": True, "routines": items}); return
+    if path == "/api/routines/run":
+        items = _routines_load()
+        for r in items:
+            if r.get("id") == body.get("id"):
+                out = _routine_run(r); _routines_save(items)
+                handler._json(200, {"ok": True, "output": out, "routine": r}); return
+        handler._json(404, {"error": "not found"}); return
+    if path == "/api/routines/delete":
+        items = [x for x in _routines_load() if x.get("id") != body.get("id")]
+        _routines_save(items); handler._json(200, {"ok": True, "routines": items}); return
+    if path == "/api/mcp":
+        cfg = _mcp_cfg_load(); s = body.get("server", {})
+        if not s.get("id"):
+            s["id"] = (re.sub(r"[^a-z0-9]+", "-", (s.get("name", "srv")).lower()).strip("-")
+                       or uuid.uuid4().hex[:6])
+        s.setdefault("enabled", True)
+        cfg["servers"] = [x for x in cfg.get("servers", []) if x.get("id") != s["id"]] + [s]
+        _mcp_cfg_save(cfg); handler._json(200, {"ok": True, **cfg}); return
+    if path == "/api/mcp/delete":
+        cfg = _mcp_cfg_load()
+        cfg["servers"] = [x for x in cfg.get("servers", []) if x.get("id") != body.get("id")]
+        _mcp_cfg_save(cfg); handler._json(200, {"ok": True, **cfg}); return
+    if path == "/api/mcp/tools":
+        try: handler._json(200, {"tools": _mcp_all_tools(body.get("ids"))})
+        except Exception as e: handler._json(200, {"tools": [], "error": str(e)})
+        return
+    if path == "/api/chats":
+        chat = body.get("chat", {})
+        if not chat.get("id"): chat["id"] = uuid.uuid4().hex[:8]
+        _chat_save(chat); handler._json(200, {"ok": True, "id": chat["id"]}); return
+    if path == "/api/chats/delete":
+        _chat_delete(body.get("id")); handler._json(200, {"ok": True}); return
+    if path == "/api/connect":
+        name = body.get("platform"); key = body.get("key", "")
+        if name in PLATFORM_DEFS:
+            d = dict(PLATFORM_DEFS[name])
+            if key: d["key"] = key
+            CFG.setdefault("platforms", {})[name] = d; save_cfg()
+            handler._json(200, {"ok": True}); return
+        handler._json(400, {"error": "unknown platform"}); return
+    if path == "/api/prefs":
+        CFG.setdefault("prefs", {}).update(body.get("prefs", {})); save_cfg()
+        handler._json(200, {"ok": True, "prefs": CFG["prefs"]}); return
+    handler._json(404, {"error": "not found"})
+
+
+def cmd_studio(host="127.0.0.1", port=8799, open_ui=True, model=None):
+    _app_dirs(); _start_scheduler()
+    if model:
+        rec = match_model(model)
+        if rec: _SERVE["rec"] = rec
+    url = f"http://{host}:{port}/"
+    srv = _QuietHTTPServer((host, port), _ServeHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    show_logo("app")
+    print(MG + "  CS App running at " + RSTC + url)
+    print(DIM + "  chat · artifacts · MCP · routines — Ctrl-C to stop" + RSTC)
+    native = False
+    if open_ui:
+        try:
+            import webview  # pywebview (optional)
+            webview.create_window(APP_LONG, url, width=1180, height=820,
+                                  min_size=(900, 600))
+            native = True
+            webview.start()          # blocks until the window is closed
+        except Exception:
+            native = False
+        if not native:
+            try:
+                import webbrowser; webbrowser.open(url)
+            except Exception:
+                pass
+    if native:
+        _APP_SCHED["stop"] = True; srv.shutdown(); return
+    try:
+        while True: time.sleep(1)
+    except KeyboardInterrupt:
+        print(YL + "  ⌁ stopped" + RSTC)
+    finally:
+        _APP_SCHED["stop"] = True; srv.shutdown()
+
+
+APP_HTML = r"""<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>CS Framework</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-110 -110 220 220'%3E%3Cpolygon points='0,-100 86.6,-50 0,0 -86.6,-50' fill='%2338bdf8'/%3E%3Cpolygon points='-86.6,-50 0,0 0,100 -86.6,50' fill='%234f46e5'/%3E%3Cpolygon points='86.6,-50 86.6,50 0,100 0,0' fill='%23c026d3'/%3E%3C/svg%3E"/>
+<style>
+:root{
+  --bg:#0b0f17; --bg2:#111827; --panel:#0f1626; --panel2:#151f33;
+  --border:#243048; --text:#e6edf7; --muted:#8ea3c0; --faint:#5b6b86;
+  --accent:#38bdf8; --accent2:#8b5cf6; --accent3:#d946ef;
+  --user:#1b2740; --assistant:#0f1626; --code:#0a0e17; --good:#34d399; --bad:#f87171;
+  --radius:14px; --sb:264px;
+}
+:root[data-theme="light"]{
+  --bg:#f6f8fc; --bg2:#eef2f9; --panel:#ffffff; --panel2:#f2f5fb;
+  --border:#dbe3f0; --text:#0f1a2c; --muted:#54627a; --faint:#8593ab;
+  --user:#e7efff; --assistant:#ffffff; --code:#f1f4fa;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  font:14.5px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Ubuntu,"Helvetica Neue",Arial,sans-serif;
+  background:var(--bg); color:var(--text); overflow:hidden;
+}
+button{font:inherit;cursor:pointer;color:inherit;border:none;background:none}
+input,textarea,select{font:inherit;color:inherit}
+a{color:var(--accent)}
+.app{display:grid;grid-template-columns:var(--sb) 1fr;height:100vh}
+/* ---------- sidebar ---------- */
+.sb{background:linear-gradient(180deg,var(--bg2),var(--bg));border-right:1px solid var(--border);
+    display:flex;flex-direction:column;min-width:0}
+.brand{display:flex;align-items:center;gap:10px;padding:16px 16px 10px}
+.brand svg{width:26px;height:26px;flex:none}
+.brand b{font-size:15px;letter-spacing:.3px}
+.brand span{color:var(--faint);font-size:11px;margin-left:auto}
+.newchat{margin:6px 12px 10px;padding:10px 12px;border-radius:12px;
+  background:linear-gradient(90deg,var(--accent),var(--accent2));color:#04121f;font-weight:650;
+  display:flex;align-items:center;gap:8px;justify-content:center}
+.newchat:hover{filter:brightness(1.08)}
+.nav{display:flex;gap:4px;padding:0 12px 8px}
+.nav button{flex:1;padding:7px 4px;border-radius:9px;color:var(--muted);font-size:12.5px}
+.nav button.active{background:var(--panel2);color:var(--text)}
+.nav button:hover{color:var(--text)}
+.chats{flex:1;overflow:auto;padding:4px 8px 12px}
+.chatitem{padding:9px 10px;border-radius:10px;color:var(--muted);cursor:pointer;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;gap:8px;align-items:center}
+.chatitem:hover{background:var(--panel2);color:var(--text)}
+.chatitem.active{background:var(--panel2);color:var(--text)}
+.chatitem .x{margin-left:auto;color:var(--faint);opacity:0;font-size:12px}
+.chatitem:hover .x{opacity:1}
+.sb-foot{padding:10px 14px;border-top:1px solid var(--border);color:var(--faint);font-size:11px;
+  display:flex;align-items:center;gap:8px}
+/* ---------- main ---------- */
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.top{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);
+  background:var(--panel)}
+.top select{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:7px 10px;max-width:340px}
+.pill{display:flex;align-items:center;gap:7px;background:var(--panel2);border:1px solid var(--border);
+  border-radius:999px;padding:5px 11px;font-size:12.5px;color:var(--muted)}
+.pill input{accent-color:var(--accent)}
+.icobtn{width:34px;height:34px;border-radius:10px;background:var(--panel2);border:1px solid var(--border);
+  display:flex;align-items:center;justify-content:center}
+.icobtn:hover{border-color:var(--accent)}
+.spacer{flex:1}
+.view{flex:1;overflow:auto;min-height:0}
+.view.hidden{display:none}
+/* ---------- chat ---------- */
+.msgs{max-width:840px;margin:0 auto;padding:24px 20px 8px}
+.msg{display:flex;gap:14px;padding:14px 0}
+.avatar{width:30px;height:30px;border-radius:8px;flex:none;display:flex;align-items:center;justify-content:center;
+  font-size:13px;font-weight:700}
+.msg.user .avatar{background:linear-gradient(135deg,#334155,#1e293b);color:#cbd5e1}
+.msg.assistant .avatar{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#04121f}
+.bubble{min-width:0;flex:1}
+.role{font-size:11px;color:var(--faint);margin-bottom:2px;text-transform:uppercase;letter-spacing:.6px}
+.md{overflow-wrap:anywhere}
+.md p{margin:.5em 0}.md ul,.md ol{margin:.4em 0 .4em 1.3em}.md h1,.md h2,.md h3{margin:.7em 0 .3em}
+.md blockquote{border-left:3px solid var(--border);margin:.5em 0;padding:.1em .9em;color:var(--muted)}
+.md code{background:var(--code);padding:.12em .4em;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em}
+.md pre{margin:0}
+.codeblock{border:1px solid var(--border);border-radius:12px;overflow:hidden;margin:.7em 0;background:var(--code)}
+.codebar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--panel2);border-bottom:1px solid var(--border);font-size:12px;color:var(--muted)}
+.codebar .lang{font-weight:600}
+.codebar .sp{flex:1}
+.codebar button{color:var(--muted);font-size:12px;padding:2px 6px;border-radius:6px}
+.codebar button:hover{color:var(--text);background:var(--bg2)}
+.codeblock pre{margin:0;padding:12px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.55}
+.toolchip{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);
+  background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:4px 9px;margin:.35em .3em 0 0}
+.toolchip b{color:var(--accent)}
+.toolout{border:1px dashed var(--border);border-radius:10px;padding:8px 10px;margin:.35em 0;
+  background:var(--code);font-family:ui-monospace,monospace;font-size:12px;white-space:pre-wrap;max-height:220px;overflow:auto;color:var(--muted)}
+.cursor{display:inline-block;width:7px;height:15px;background:var(--accent);margin-left:1px;
+  animation:blink 1s steps(2) infinite;vertical-align:text-bottom}
+@keyframes blink{50%{opacity:0}}
+.composer{max-width:840px;margin:0 auto;width:100%;padding:10px 20px 20px}
+.cbox{display:flex;gap:10px;align-items:flex-end;background:var(--panel);border:1px solid var(--border);
+  border-radius:16px;padding:10px 10px 10px 14px}
+.cbox:focus-within{border-color:var(--accent)}
+.cbox textarea{flex:1;background:none;border:none;resize:none;outline:none;max-height:200px;line-height:1.5;padding:6px 0}
+.send{width:38px;height:38px;border-radius:11px;flex:none;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#04121f;display:flex;align-items:center;justify-content:center;font-size:17px}
+.send:disabled{opacity:.4;cursor:default}
+.empty{max-width:560px;margin:12vh auto 0;text-align:center;color:var(--muted)}
+.empty h2{color:var(--text);font-weight:650;margin-bottom:6px}
+.empty .g{background:linear-gradient(90deg,var(--accent),var(--accent3));-webkit-background-clip:text;background-clip:text;color:transparent}
+.starters{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:16px}
+.starters button{border:1px solid var(--border);background:var(--panel);border-radius:10px;padding:9px 12px;color:var(--muted);font-size:13px}
+.starters button:hover{color:var(--text);border-color:var(--accent)}
+/* ---------- panels (routines/mcp/settings) ---------- */
+.pane{max-width:820px;margin:0 auto;padding:22px 20px}
+.pane h2{margin:.2em 0 .1em;font-size:19px}
+.pane .sub{color:var(--muted);margin-bottom:16px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px;margin:12px 0}
+.card h3{margin:0 0 6px;font-size:14px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:6px 0}
+.row>label{min-width:120px;color:var(--muted);font-size:13px}
+.fld{background:var(--panel2);border:1px solid var(--border);border-radius:9px;padding:8px 10px;flex:1;min-width:140px;outline:none}
+.fld:focus{border-color:var(--accent)}
+textarea.fld{min-height:70px;resize:vertical;font-family:inherit}
+.btn{background:linear-gradient(90deg,var(--accent),var(--accent2));color:#04121f;font-weight:600;border-radius:10px;padding:9px 14px}
+.btn:hover{filter:brightness(1.08)}
+.btn.ghost{background:var(--panel2);border:1px solid var(--border);color:var(--text);font-weight:500}
+.btn.ghost:hover{border-color:var(--accent)}
+.btn.danger{background:none;border:1px solid var(--border);color:var(--bad)}
+.tag{display:inline-block;font-size:11px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:2px 8px;margin:2px 4px 2px 0}
+.tag.ok{color:var(--good);border-color:var(--good)}
+.tag.no{color:var(--faint)}
+.switch{width:40px;height:22px;border-radius:999px;background:var(--border);position:relative;transition:.15s}
+.switch.on{background:var(--good)}
+.switch b{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:.15s}
+.switch.on b{left:20px}
+/* ---------- artifact panel ---------- */
+.artifact{position:fixed;top:0;right:0;height:100vh;width:min(560px,46vw);background:var(--panel);
+  border-left:1px solid var(--border);transform:translateX(100%);transition:transform .22s ease;
+  display:flex;flex-direction:column;z-index:20;box-shadow:-20px 0 40px rgba(0,0,0,.25)}
+.artifact.open{transform:none}
+.artifact .ah{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--border)}
+.artifact .ah b{font-size:13px}
+.artifact .tabs{display:flex;gap:4px;margin-left:auto}
+.artifact .tabs button{padding:5px 10px;border-radius:8px;color:var(--muted);font-size:12.5px}
+.artifact .tabs button.active{background:var(--panel2);color:var(--text)}
+.artifact iframe{flex:1;border:none;background:#fff;width:100%}
+.artifact pre{flex:1;margin:0;padding:14px;overflow:auto;font-family:ui-monospace,monospace;font-size:12.5px;background:var(--code)}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);
+  border:1px solid var(--border);border-radius:10px;padding:9px 14px;font-size:13px;z-index:50;opacity:0;transition:.2s}
+.toast.show{opacity:1}
+@media(max-width:720px){.app{grid-template-columns:1fr}.sb{position:fixed;left:0;top:0;bottom:0;width:var(--sb);z-index:30;transform:translateX(-100%);transition:.2s}.sb.open{transform:none}.artifact{width:100vw}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sb" id="sb">
+    <div class="brand">
+      <svg viewBox="-110 -110 220 220"><polygon points="0,-100 86.6,-50 0,0 -86.6,-50" fill="#38bdf8"/><polygon points="-86.6,-50 0,0 0,100 -86.6,50" fill="#4f46e5"/><polygon points="86.6,-50 86.6,50 0,100 0,0" fill="#c026d3"/><polygon points="0,-100 86.6,-50 86.6,50 0,100 -86.6,50 -86.6,-50" fill="none" stroke="#93c5fd" stroke-width="6"/></svg>
+      <b>CS Framework</b><span id="ver"></span>
+    </div>
+    <button class="newchat" onclick="App.newChat()">＋ New chat</button>
+    <div class="nav">
+      <button data-view="chat" class="active" onclick="App.go('chat')">Chat</button>
+      <button data-view="routines" onclick="App.go('routines')">Routines</button>
+      <button data-view="mcp" onclick="App.go('mcp')">MCP</button>
+      <button data-view="settings" onclick="App.go('settings')">Settings</button>
+    </div>
+    <div class="chats" id="chatlist"></div>
+    <div class="sb-foot"><span id="cwd"></span></div>
+  </aside>
+
+  <main class="main">
+    <div class="top">
+      <button class="icobtn" onclick="document.getElementById('sb').classList.toggle('open')" title="menu" style="display:none" id="burger">☰</button>
+      <select id="model" onchange="App.pickModel(this.value)"></select>
+      <label class="pill" title="Let the model call built-in + MCP tools"><input type="checkbox" id="tools"/> Tools</label>
+      <div class="spacer"></div>
+      <button class="icobtn" id="themebtn" onclick="App.toggleTheme()" title="theme">◐</button>
+    </div>
+
+    <section class="view" id="view-chat">
+      <div class="msgs" id="msgs"></div>
+      <div class="composer">
+        <div class="cbox">
+          <textarea id="input" rows="1" placeholder="Message the model…  (Enter to send, Shift+Enter for newline)"></textarea>
+          <button class="send" id="sendbtn" onclick="App.send()">➤</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="view hidden" id="view-routines"></section>
+    <section class="view hidden" id="view-mcp"></section>
+    <section class="view hidden" id="view-settings"></section>
+  </main>
+</div>
+
+<div class="artifact" id="artifact">
+  <div class="ah">
+    <b id="art-title">Artifact</b>
+    <div class="tabs">
+      <button id="art-tab-preview" class="active" onclick="App.artTab('preview')">Preview</button>
+      <button id="art-tab-code" onclick="App.artTab('code')">Code</button>
+    </div>
+    <button class="icobtn" onclick="App.closeArt()" style="width:28px;height:28px">✕</button>
+  </div>
+  <iframe id="art-frame" sandbox="allow-scripts allow-popups allow-forms allow-modals"></iframe>
+  <pre id="art-code" style="display:none"></pre>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $=(s,e=document)=>e.querySelector(s); const $$=(s,e=document)=>[...e.querySelectorAll(s)];
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path,method='GET',body){
+  const o={method,headers:{}};
+  if(body){o.headers['Content-Type']='application/json';o.body=JSON.stringify(body);}
+  const r=await fetch(path,o); const t=await r.text();
+  try{return JSON.parse(t);}catch(e){return {error:t};}
+}
+function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1800);}
+
+const App={
+  state:{models:[],model:null,tools:false,demo:'cs-echo',prefs:{},cwd:''},
+  chat:{id:null,title:'',model:null,messages:[]},
+  artifacts:[], streaming:false,
+
+  async init(){
+    const s=await api('/api/state'); this.state=Object.assign(this.state,s);
+    $('#ver').textContent='v'+s.version;
+    $('#cwd').textContent='⌂ '+(s.cwd||'');
+    this.state.model=(localStorage.getItem('cs.model'))||s.demo_model||(s.models[0]&&s.models[0].id);
+    this.state.tools=localStorage.getItem('cs.tools')==='1';
+    $('#tools').checked=this.state.tools;
+    this.setTheme(localStorage.getItem('cs.theme')||(s.prefs&&s.prefs.theme)||'dark');
+    this.fillModels(); this.newChat(); await this.loadChats();
+    $('#tools').addEventListener('change',e=>{this.state.tools=e.target.checked;localStorage.setItem('cs.tools',e.target.checked?'1':'0');});
+    const ta=$('#input');
+    ta.addEventListener('input',()=>{ta.style.height='auto';ta.style.height=Math.min(200,ta.scrollHeight)+'px';});
+    ta.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();this.send();}});
+    if(window.innerWidth<=720)$('#burger').style.display='flex';
+  },
+  fillModels(){
+    const sel=$('#model'); sel.innerHTML='';
+    for(const m of this.state.models){
+      const o=document.createElement('option'); o.value=m.id;
+      o.textContent=m.name+(m.runtime?'  · '+m.runtime:'')+(m.size?'  · '+m.size:'');
+      if(m.id===this.state.model)o.selected=true; sel.appendChild(o);
+    }
+  },
+  pickModel(v){this.state.model=v;this.chat.model=v;localStorage.setItem('cs.model',v);},
+  toggleTheme(){this.setTheme(document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark');},
+  setTheme(t){document.documentElement.setAttribute('data-theme',t);localStorage.setItem('cs.theme',t);
+    api('/api/prefs','POST',{prefs:{theme:t}});},
+
+  go(view){
+    this.view=view;
+    $$('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
+    $$('.view').forEach(v=>v.classList.add('hidden'));
+    $('#view-'+view).classList.remove('hidden');
+    if(view==='routines')this.renderRoutines();
+    if(view==='mcp')this.renderMCP();
+    if(view==='settings')this.renderSettings();
+    if(window.innerWidth<=720)$('#sb').classList.remove('open');
+  },
+
+  // ---------- chats ----------
+  newChat(){this.chat={id:null,title:'',model:this.state.model,messages:[]};this.artifacts=[];this.go('chat');this.renderMessages();},
+  async loadChats(){const r=await api('/api/chats');this.renderChatList(r.chats||[]);},
+  renderChatList(chats){
+    const el=$('#chatlist');el.innerHTML='';
+    for(const c of chats){
+      const d=document.createElement('div');d.className='chatitem'+(c.id===this.chat.id?' active':'');
+      d.innerHTML='<span>💬</span><span style="overflow:hidden;text-overflow:ellipsis">'+esc(c.title||'(untitled)')+'</span><span class="x" title="delete">✕</span>';
+      d.onclick=(e)=>{if(e.target.classList.contains('x')){this.delChat(c.id);}else{this.openChat(c.id);}};
+      el.appendChild(d);
+    }
+  },
+  async openChat(id){const c=await api('/api/chats/'+id);if(!c||c.error)return;this.chat=c;this.chat.messages=c.messages||[];this.artifacts=[];this.go('chat');this.renderMessages();this.loadChats();},
+  async delChat(id){await api('/api/chats/delete','POST',{id});if(this.chat.id===id)this.newChat();this.loadChats();},
+  async saveChat(){
+    if(!this.chat.messages.length)return;
+    if(!this.chat.title){const u=this.chat.messages.find(m=>m.role==='user');this.chat.title=(u?u.content:'Chat').slice(0,48);}
+    this.chat.model=this.state.model;
+    const r=await api('/api/chats','POST',{chat:this.chat});
+    if(r.id)this.chat.id=r.id; this.loadChats();
+  },
+
+  renderMessages(){
+    const el=$('#msgs');
+    if(!this.chat.messages.length){
+      el.innerHTML='<div class="empty"><h2>Welcome to <span class="g">CS Framework</span></h2><div>Chat with any local model, connect MCP tools, render artifacts, and schedule routines — all running on your machine.</div><div class="starters"><button onclick="App.starter(this)">Explain what CS Framework can do</button><button onclick="App.starter(this)">Write a small HTML page with a button</button><button onclick="App.starter(this)">Give me a Python quicksort</button></div></div>';
+      return;
+    }
+    el.innerHTML='';
+    for(const m of this.chat.messages)el.appendChild(this.msgEl(m));
+    el.scrollTop=el.scrollHeight;
+  },
+  starter(b){$('#input').value=b.textContent;this.send();},
+  msgEl(m){
+    const d=document.createElement('div');d.className='msg '+m.role;
+    const av=m.role==='user'?'You':'CS';
+    d.innerHTML='<div class="avatar">'+av+'</div><div class="bubble"><div class="role">'+m.role+'</div><div class="md"></div></div>';
+    const md=$('.md',d);
+    if(m.role==='user'){md.innerHTML='<p>'+esc(m.content).replace(/\n/g,'<br>')+'</p>';}
+    else{md.innerHTML=this.render(m.content||'',m);}
+    return d;
+  },
+
+  async send(){
+    if(this.streaming)return;
+    const ta=$('#input');const text=ta.value.trim();if(!text)return;
+    ta.value='';ta.style.height='auto';
+    this.chat.messages.push({role:'user',content:text});
+    const asst={role:'assistant',content:'',tools:[]};this.chat.messages.push(asst);
+    this.renderMessages();
+    const msgsEl=$('#msgs');const bubble=msgsEl.lastChild.querySelector('.md');
+    bubble.innerHTML='<span class="cursor"></span>';
+    this.streaming=true;$('#sendbtn').disabled=true;
+    const payload={model:this.state.model,tools:this.state.tools,cwd:this.state.cwd,
+      messages:this.chat.messages.filter(m=>m.role!=='assistant'||m.content).map(m=>({role:m.role,content:m.content}))};
+    try{
+      const resp=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const reader=resp.body.getReader();const dec=new TextDecoder();let buf='';let finished=false;
+      const render=()=>{bubble.innerHTML=this.render(asst.content,asst)+'<span class="cursor"></span>';msgsEl.scrollTop=msgsEl.scrollHeight;};
+      while(!finished){
+        const {done,value}=await reader.read(); if(done)break;
+        buf+=dec.decode(value,{stream:true});
+        let i;
+        while((i=buf.indexOf('\n\n'))>=0){
+          const line=buf.slice(0,i);buf=buf.slice(i+2);
+          if(!line.startsWith('data:'))continue;
+          let ev;try{ev=JSON.parse(line.slice(5).trim());}catch(e){continue;}
+          if(ev.type==='token'){asst.content+=ev.text;render();}
+          else if(ev.type==='tool_call'){asst.tools.push({name:ev.name,args:ev.args,result:null});render();}
+          else if(ev.type==='tool_result'){const t=asst.tools[asst.tools.length-1];if(t)t.result=ev.result;render();}
+          else if(ev.type==='error'){asst.content+='\n\n**Error:** '+ev.error;render();}
+          else if(ev.type==='done'){finished=true;break;}
+        }
+      }
+      try{await reader.cancel();}catch(e){}
+    }catch(e){asst.content+='\n\n**Connection error:** '+e;}
+    bubble.innerHTML=this.render(asst.content,asst);
+    this.streaming=false;$('#sendbtn').disabled=false;
+    this.saveChat();
+  },
+
+  // ---------- markdown + artifacts ----------
+  render(text,msg){
+    const arts=[];
+    let out=text.replace(/```([\w.-]*)\n?([\s\S]*?)```/g,(m,lang,code)=>{
+      const id=this.artifacts.length+arts.length;
+      const l=(lang||'text').toLowerCase();
+      arts.push({lang:l,code:code.replace(/\n$/,'')});
+      const previewable=['html','svg','xml','htm'].includes(l);
+      return '\u0000ART'+id+':'+(previewable?'1':'0')+':'+l+'\u0000';
+    });
+    out=this.mdInline(out);
+    // toolchips
+    if(msg&&msg.tools&&msg.tools.length){
+      let chips='';
+      for(const t of msg.tools){
+        chips+='<div class="toolchip">🛠 <b>'+esc(t.name||'tool')+'</b> '+esc(JSON.stringify(t.args||{}).slice(0,60))+'</div>';
+        if(t.result!=null)chips+='<div class="toolout">'+esc(String(t.result).slice(0,1200))+'</div>';
+      }
+      out=chips+out;
+    }
+    // splice artifacts back
+    const base=this.artifacts.length;
+    out=out.replace(/\u0000ART(\d+):([01]):([\w.-]+)\u0000/g,(m,idx,pv,lang)=>{
+      const a=arts[idx-base];if(!a)return '';
+      const gi=this.artifacts.length;this.artifacts.push(a);
+      const openable=pv==='1';
+      return '<div class="codeblock"><div class="codebar"><span class="lang">'+esc(lang)+'</span><span class="sp"></span>'+
+        (openable?'<button onclick="App.openArt('+gi+',\'preview\')">▸ Preview</button>':'')+
+        '<button onclick="App.openArt('+gi+',\'code\')">⧉ Open</button>'+
+        '<button onclick="App.copyCode('+gi+')">Copy</button></div><pre>'+esc(a.code)+'</pre></div>';
+    });
+    // auto-open last previewable artifact while streaming a fresh render
+    return out;
+  },
+  mdInline(t){
+    // escape, then apply lightweight markdown (headings, bold, italic, code, links, lists, quotes)
+    t=esc(t);
+    t=t.replace(/^### (.*)$/gm,'<h3>$1</h3>').replace(/^## (.*)$/gm,'<h2>$1</h2>').replace(/^# (.*)$/gm,'<h2>$1</h2>');
+    t=t.replace(/`([^`]+)`/g,'<code>$1</code>');
+    t=t.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>').replace(/(^|[^*])\*([^*]+)\*/g,'$1<i>$2</i>');
+    t=t.replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+    t=t.replace(/^&gt; (.*)$/gm,'<blockquote>$1</blockquote>');
+    t=t.replace(/^\s*[-*] (.*)$/gm,'<li>$1</li>');
+    t=t.replace(/(<li>[\s\S]*?<\/li>)/g,m=>'<ul>'+m+'</ul>').replace(/<\/ul>\s*<ul>/g,'');
+    t=t.split(/\n{2,}/).map(p=>/^\s*<(h\d|ul|ol|blockquote|div|pre)/.test(p)?p:'<p>'+p.replace(/\n/g,'<br>')+'</p>').join('');
+    return t;
+  },
+  copyCode(i){const a=this.artifacts[i];if(!a)return;navigator.clipboard.writeText(a.code).then(()=>toast('Copied'));},
+  openArt(i,tab){
+    const a=this.artifacts[i];if(!a)return;
+    $('#art-title').textContent='Artifact · '+a.lang;
+    const frame=$('#art-frame');
+    if(['html','htm'].includes(a.lang))frame.srcdoc=a.code;
+    else if(['svg','xml'].includes(a.lang))frame.srcdoc='<body style="margin:0;display:grid;place-items:center;height:100vh">'+a.code+'</body>';
+    else frame.srcdoc='<pre style="font:13px monospace;padding:14px;white-space:pre-wrap">'+esc(a.code)+'</pre>';
+    $('#art-code').textContent=a.code;
+    $('#artifact').classList.add('open');
+    this.artTab(tab||'preview');
+  },
+  artTab(t){
+    $('#art-tab-preview').classList.toggle('active',t==='preview');
+    $('#art-tab-code').classList.toggle('active',t==='code');
+    $('#art-frame').style.display=t==='preview'?'block':'none';
+    $('#art-code').style.display=t==='code'?'block':'none';
+  },
+  closeArt(){$('#artifact').classList.remove('open');},
+
+  // ---------- routines ----------
+  async renderRoutines(){
+    const r=await api('/api/routines');const items=r.routines||[];
+    const opts=this.state.models.map(m=>'<option value="'+m.id+'">'+esc(m.name)+'</option>').join('');
+    let h='<div class="pane"><h2>Routines</h2><div class="sub">Scheduled prompts that run automatically while the app is open.</div>';
+    h+='<div class="card"><h3>New routine</h3>'+
+      '<div class="row"><label>Name</label><input class="fld" id="r-name" placeholder="Daily summary"></div>'+
+      '<div class="row"><label>Model</label><select class="fld" id="r-model">'+opts+'</select></div>'+
+      '<div class="row"><label>Prompt</label><textarea class="fld" id="r-prompt" placeholder="What should it do?"></textarea></div>'+
+      '<div class="row"><label>Every (min)</label><input class="fld" id="r-every" type="number" min="1" placeholder="60" style="max-width:120px">'+
+      '<label style="min-width:auto">or daily at</label><input class="fld" id="r-at" placeholder="09:00" style="max-width:120px"></div>'+
+      '<div class="row"><button class="btn" onclick="App.addRoutine()">Add routine</button></div></div>';
+    for(const it of items){
+      h+='<div class="card"><div class="row"><h3 style="flex:1">'+esc(it.name||'(routine)')+'</h3>'+
+        '<span class="tag '+(it.enabled?'ok':'no')+'">'+(it.enabled?'enabled':'paused')+'</span></div>'+
+        '<div class="sub" style="margin:0">'+esc(it.model||'')+' · '+(it.every_minutes?('every '+it.every_minutes+'m'):(it.at_time?('daily '+it.at_time):'manual'))+
+        (it.last_run?(' · last '+new Date(it.last_run*1000).toLocaleString()):'')+'</div>'+
+        '<div class="toolout" style="margin-top:8px">'+esc(it.prompt||'')+'</div>'+
+        (it.last_output?'<div class="toolout">'+esc(it.last_output)+'</div>':'')+
+        '<div class="row"><button class="btn" onclick="App.runRoutine(\''+it.id+'\')">Run now</button>'+
+        '<button class="btn ghost" onclick="App.toggleRoutine(\''+it.id+'\')">'+(it.enabled?'Pause':'Enable')+'</button>'+
+        '<button class="btn danger" onclick="App.delRoutine(\''+it.id+'\')">Delete</button></div></div>';
+    }
+    h+='</div>';$('#view-routines').innerHTML=h;
+    this._routines=items;
+  },
+  async addRoutine(){
+    const r={name:$('#r-name').value.trim()||'Routine',model:$('#r-model').value,
+      prompt:$('#r-prompt').value.trim(),enabled:true};
+    const every=parseInt($('#r-every').value);if(every)r.every_minutes=every;
+    const at=$('#r-at').value.trim();if(at)r.at_time=at;
+    if(!r.prompt){toast('Add a prompt');return;}
+    await api('/api/routines','POST',{routine:r});toast('Routine added');this.renderRoutines();
+  },
+  async runRoutine(id){toast('Running…');const r=await api('/api/routines/run','POST',{id});if(r.ok)toast('Done');this.renderRoutines();},
+  async toggleRoutine(id){const it=(this._routines||[]).find(x=>x.id===id);if(!it)return;it.enabled=!it.enabled;await api('/api/routines','POST',{routine:it});this.renderRoutines();},
+  async delRoutine(id){await api('/api/routines/delete','POST',{id});this.renderRoutines();},
+
+  // ---------- mcp ----------
+  async renderMCP(){
+    const cfg=await api('/api/mcp');const servers=cfg.servers||[];
+    let h='<div class="pane"><h2>MCP servers</h2><div class="sub">Connect Model Context Protocol servers (stdio). Their tools become callable in chat when <b>Tools</b> is on.</div>';
+    h+='<div class="card"><h3>Add server</h3>'+
+      '<div class="row"><label>Name</label><input class="fld" id="m-name" placeholder="filesystem"></div>'+
+      '<div class="row"><label>Command</label><input class="fld" id="m-cmd" placeholder="npx"></div>'+
+      '<div class="row"><label>Args</label><input class="fld" id="m-args" placeholder="-y @modelcontextprotocol/server-filesystem /path"></div>'+
+      '<div class="row"><button class="btn" onclick="App.addMCP()">Add server</button></div>'+
+      '<div class="sub" style="margin:8px 0 0">Args are space-separated. Set env in cs_data/app/mcp.json for secrets.</div></div>';
+    for(const s of servers){
+      h+='<div class="card"><div class="row"><h3 style="flex:1">'+esc(s.name||s.id)+'</h3>'+
+        '<span class="tag '+(s.enabled!==false?'ok':'no')+'">'+(s.enabled!==false?'enabled':'disabled')+'</span></div>'+
+        '<div class="sub" style="margin:0"><code>'+esc(s.command||'')+' '+esc((s.args||[]).join(' '))+'</code></div>'+
+        '<div id="tools-'+s.id+'" style="margin-top:8px"></div>'+
+        '<div class="row"><button class="btn ghost" onclick="App.mcpTools(\''+s.id+'\')">List tools</button>'+
+        '<button class="btn ghost" onclick="App.toggleMCP(\''+s.id+'\')">'+(s.enabled!==false?'Disable':'Enable')+'</button>'+
+        '<button class="btn danger" onclick="App.delMCP(\''+s.id+'\')">Remove</button></div></div>';
+    }
+    h+='</div>';$('#view-mcp').innerHTML=h;this._mcp=servers;
+  },
+  async addMCP(){
+    const args=$('#m-args').value.trim();
+    const s={name:$('#m-name').value.trim()||'server',command:$('#m-cmd').value.trim(),
+      args:args?args.split(/\s+/):[],enabled:true};
+    if(!s.command){toast('Command required');return;}
+    await api('/api/mcp','POST',{server:s});toast('Server added');this.renderMCP();
+  },
+  async mcpTools(id){
+    const el=$('#tools-'+id);el.innerHTML='<span class="tag">loading…</span>';
+    const r=await api('/api/mcp/tools','POST',{ids:[id]});
+    if(r.error||!r.tools||!r.tools.length){el.innerHTML='<span class="tag no">'+esc(r.error||'no tools / not reachable')+'</span>';return;}
+    el.innerHTML=r.tools.map(t=>'<span class="tag ok" title="'+esc(t.description||'')+'">'+esc(t.name)+'</span>').join('');
+  },
+  async toggleMCP(id){const s=(this._mcp||[]).find(x=>x.id===id);if(!s)return;s.enabled=s.enabled===false;await api('/api/mcp','POST',{server:s});this.renderMCP();},
+  async delMCP(id){await api('/api/mcp/delete','POST',{id});this.renderMCP();},
+
+  // ---------- settings ----------
+  async renderSettings(){
+    const st=await api('/api/state');this.state.models=st.models;this.state.runtimes=st.runtimes;
+    let h='<div class="pane"><h2>Settings</h2><div class="sub">Model context, runtimes, and connections.</div>';
+    // context editor
+    const opts=st.models.filter(m=>m.local&&m.kind!=='demo').map(m=>'<option value="'+m.id+'">'+esc(m.name)+'</option>').join('');
+    h+='<div class="card"><h3>Model context</h3>'+
+      (opts?('<div class="row"><label>Model</label><select class="fld" id="s-model" onchange="App.loadCtx(this.value)">'+opts+'</select></div>'+
+      '<div id="ctxform"></div>'):'<div class="sub" style="margin:0">No local models yet — <code>cs pull &lt;repo&gt;</code> to add one.</div>')+'</div>';
+    // runtimes
+    h+='<div class="card"><h3>Runtimes</h3><div>'+
+      (st.runtimes||[]).map(r=>'<span class="tag '+(r.ok?'ok':'no')+'" title="'+esc(r.detail||'')+'">'+esc(r.id)+'</span>').join('')+
+      '</div><div class="sub" style="margin-top:6px">Install more with <code>cs install &lt;target&gt;</code>. Custom runtimes: drop a plugin in <code>cs_data/plugins/</code>.</div></div>';
+    // connections
+    const conn=(st.platforms||[]).map(p=>p.id);
+    h+='<div class="card"><h3>API connections</h3><div class="row"><label>Platform</label>'+
+      '<select class="fld" id="c-plat">'+(st.connectable||[]).map(p=>'<option'+(conn.includes(p)?' selected':'')+'>'+p+'</option>').join('')+'</select>'+
+      '<input class="fld" id="c-key" placeholder="API key (blank for local)" type="password"></div>'+
+      '<div class="row"><button class="btn" onclick="App.connect()">Connect</button>'+
+      '<span class="sub" style="margin:0">Connected: '+(conn.length?conn.map(esc).join(', '):'none')+'</span></div></div>';
+    // prefs
+    h+='<div class="card"><h3>Preferences</h3>'+
+      '<div class="row"><label>Theme</label><button class="btn ghost" onclick="App.toggleTheme()">Toggle light / dark</button></div>'+
+      '<div class="row"><label>Auto-run tools</label><span id="pref-auto" class="switch'+((st.prefs&&st.prefs.auto_approve)?' on':'')+'" onclick="App.togglePref()"><b></b></span></div></div>';
+    h+='</div>';$('#view-settings').innerHTML=h;
+    if(opts)this.loadCtx($('#s-model').value);
+  },
+  async loadCtx(model){
+    const r=await api('/api/context?model='+encodeURIComponent(model));const c=r.context||{};
+    const f=(k,l,step)=>'<div class="row"><label>'+l+'</label><input class="fld" id="ctx-'+k+'" value="'+esc(c[k]!=null?c[k]:'')+'"'+(step?' type="number" step="'+step+'"':'')+'></div>';
+    $('#ctxform').innerHTML=
+      '<div class="row"><label>System</label><textarea class="fld" id="ctx-system">'+esc(c.system||'')+'</textarea></div>'+
+      f('temperature','Temperature','0.05')+f('top_p','Top-p','0.05')+f('max_new_tokens','Max tokens','1')+
+      f('n_ctx','Context size','1')+f('n_gpu_layers','GPU layers','1')+
+      '<div class="row"><button class="btn" onclick="App.saveCtx(\''+model+'\')">Save context</button></div>';
+  },
+  async saveCtx(model){
+    const num=v=>{const n=parseFloat(v);return isNaN(n)?undefined:n;};
+    const ctx={system:$('#ctx-system').value,temperature:num($('#ctx-temperature').value),
+      top_p:num($('#ctx-top_p').value),max_new_tokens:num($('#ctx-max_new_tokens').value),
+      n_ctx:num($('#ctx-n_ctx').value),n_gpu_layers:num($('#ctx-n_gpu_layers').value)};
+    Object.keys(ctx).forEach(k=>ctx[k]===undefined&&delete ctx[k]);
+    await api('/api/context','POST',{model,context:ctx});toast('Saved');
+  },
+  async connect(){
+    const platform=$('#c-plat').value,key=$('#c-key').value;
+    const r=await api('/api/connect','POST',{platform,key});
+    if(r.ok){toast('Connected '+platform);const s=await api('/api/state');this.state.models=s.models;this.fillModels();this.renderSettings();}
+    else toast(r.error||'failed');
+  },
+  async togglePref(){const el=$('#pref-auto');const on=!el.classList.contains('on');el.classList.toggle('on',on);await api('/api/prefs','POST',{prefs:{auto_approve:on}});},
+};
+window.addEventListener('DOMContentLoaded',()=>App.init());
+</script>
+</body>
+</html>
+"""
 
 # ─── commands ──────────────────────────────────────────────────────────────
 def match_model(q):
@@ -4897,7 +5930,7 @@ def main():
     _NO_SETUP = {"list", "scan", "doctor", "verify", "ll-log", "bonsai-setup",
                  "config", "perms", "fix", "platforms", "ps", "clean",
                  "plugin-init", "export", "install", "connect", "rm",
-                 "serve", "stop"}
+                 "serve", "stop", "studio"}
     if a.cmd not in (None, "setup") and a.cmd not in _NO_SETUP \
             and not CFG.get("setup_done"):
         if _interactive():
@@ -5003,6 +6036,7 @@ def main():
         if rec: edit_context(rec)
         else: print(RD + f"no match: {a.model}" + RSTC)
     elif a.cmd == "serve": cmd_serve(a.host, a.port, a.model)
+    elif a.cmd == "studio": cmd_studio(a.host, a.port, not getattr(a, "no_open", False), a.model)
     elif a.cmd == "agents": cmd_agents(a.action, a.agent, a.model)
     elif a.cmd == "plugin-init": cmd_plugin_init(a.name)
     elif a.cmd == "clean": cmd_clean(a.downloads)

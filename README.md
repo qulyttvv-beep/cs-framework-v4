@@ -12,7 +12,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/platform-windows%20%7C%20linux%20%7C%20macos-lightgrey.svg" alt="Platforms">
-  <img src="https://img.shields.io/badge/version-4.1.0-brightgreen.svg" alt="Version 4.1.0">
+  <img src="https://img.shields.io/badge/version-4.2.0-brightgreen.svg" alt="Version 4.2.0">
 </p>
 
 ---
@@ -22,6 +22,10 @@
 `cs.py` is one file. Drop it anywhere and it becomes a complete local-LLM
 workbench:
 
+- **Graphical app (`cs studio`)** — a Claude-desktop-style GUI served by the
+  framework itself: streaming chat, live **artifacts** (HTML/SVG preview),
+  **MCP** tool servers, scheduled **routines**, a model picker, and per-model
+  settings — all in one window, running on your machine.
 - **Model scanning** — finds every `.gguf`, `.safetensors`, `.bin`, and
   `.onnx` across the Hugging Face cache, LM Studio, Ollama, and your own
   folders.
@@ -117,6 +121,7 @@ cs
 
 ```
 cs                                     # interactive model chooser
+cs studio                              # ⭐ graphical app (chat/artifacts/MCP/routines)
 cs chat  <model>                       # chat
 cs code  <model>                       # tool-augmented coding
 cs run   <model> -p "explain X"        # one-shot prompt
@@ -130,6 +135,37 @@ cs agents                              # list coding agents and status
 cs agents install claude-code
 cs agents launch  claude-code --model <model>
 ```
+
+---
+
+## Desktop app — `cs studio`
+
+```
+cs studio                 # open the app (native window if pywebview is installed,
+                          # otherwise your browser) at http://127.0.0.1:8799
+cs studio --no-open       # just run the server (open the URL yourself)
+cs studio --port 9000 --model "Qwen3-8B"
+```
+
+A Claude-desktop-style graphical app, served by the framework and running
+entirely on your machine:
+
+- **Chat** — streaming replies with markdown + code rendering, saved chat
+  history, and a model picker across every local model and connected API.
+- **Artifacts** — code/HTML/SVG in a reply open in a side panel with live
+  **Preview** and **Code** tabs (sandboxed), just like Claude artifacts.
+- **MCP** — add Model Context Protocol servers (stdio); toggle **Tools** on and
+  the model can call their tools (and the built-in `bash`/`read`/`write`/… tools)
+  in an agentic loop.
+- **Routines** — schedule prompts to run automatically (every N minutes or daily
+  at a set time) while the app is open, with a run log.
+- **Settings** — edit each model's context (system prompt, sampling, GPU
+  layers), see runtime status, connect API platforms, and switch light/dark.
+
+No models installed yet? The app ships with a built-in **CS Echo** demo model so
+you can try it immediately, then `cs pull <repo>` or `cs connect <platform>` for
+the real thing. For a true native window: `pip install pywebview` (or
+`cs install` the `studio` extra).
 
 ---
 
@@ -169,6 +205,7 @@ python build.py --with-models      # include local models (huge)
 | Command | What it does |
 |---|---|
 | `cs` | Interactive chooser |
+| `cs studio [--host H] [--port P] [--model M] [--no-open]` | Graphical desktop/web app |
 | `cs setup [--full] [--quiet]` | First-time setup wizard |
 | `cs install-self` | Register the `cs` command on PATH |
 | `cs scan` | Rescan every model directory |

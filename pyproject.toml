@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cs-framework"
-version = "4.1.0"
+version = "4.2.0"
 description = "Single-file portable local-LLM runner, model manager, and coding-agent hub"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -38,6 +38,7 @@ transformers = ["transformers", "tokenizers", "accelerate", "safetensors"]
 onnx = ["onnxruntime"]
 hub = ["huggingface_hub", "hf_transfer"]
 compute = ["mss", "pyautogui", "pytesseract", "pillow"]
+studio = ["pywebview"]
 dev = ["pytest>=7", "pyinstaller>=6"]
 
 [project.scripts]

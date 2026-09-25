@@ -3,6 +3,41 @@
 All notable changes to CS Framework are documented here. This project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [4.2.0] — 2026-09-25
+
+The "studio" release: a Claude-desktop-style graphical app, served by the
+framework itself.
+
+### Added
+- **`cs studio` — a graphical desktop/web app.** One window with:
+  - **Chat** — streaming replies, markdown + code rendering, saved history, and
+    a model picker spanning local models and connected APIs.
+  - **Artifacts** — code/HTML/SVG in a reply opens in a side panel with live
+    **Preview** and **Code** tabs (sandboxed iframe), Claude-style.
+  - **MCP** — add Model Context Protocol servers (stdio); with **Tools** on, the
+    model calls their tools and the built-in tools in an agentic loop.
+  - **Routines** — schedule prompts (every N minutes or daily) with a run log,
+    driven by an in-app scheduler thread.
+  - **Settings** — per-model context editor, runtime status, API connections,
+    and light/dark theme.
+  - Opens in a native window via `pywebview` when installed, else the browser.
+- **Built-in `cs-echo` demo model** so the app works with zero models installed.
+- New JSON API on the server (`/api/state`, `/api/models`, `/api/context`,
+  `/api/routines`, `/api/mcp`, `/api/chats`, and a streaming `/api/chat`), plus a
+  minimal MCP stdio JSON-RPC client.
+- New logo — an isometric prism mark that reads on light and dark backgrounds.
+- Tests for the app server, endpoints, and streaming; `studio` extra
+  (`pip install cs-framework[studio]`) for `pywebview`.
+
+### Fixed
+- SSE responses now send `Connection: close` and close the socket after the
+  stream, so browsers and read-to-EOF clients get a clean end (previously the
+  `keep-alive` header with no length delimiter could hang a reader).
+
+### Changed
+- Version bumped to `4.2.0` (codename `studio-4.2`); `serve`/`stop`/`studio`
+  no longer trigger the first-run setup wizard. README documents the app.
+
 ## [4.1.0] — 2026-09-25
 
 The "revival" release: bug fixes, real packaging, standalone binaries, and CI.
