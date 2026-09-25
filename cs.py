@@ -3303,8 +3303,10 @@ def _serve_bg(port):
 
 
 class _QuietHTTPServer(ThreadingHTTPServer):
-    """ThreadingHTTPServer that logs nothing and reuses the port."""
-    allow_reuse_address = True
+    """ThreadingHTTPServer that logs nothing (and reuses the port, except on Windows)."""
+    # On Windows SO_REUSEADDR lets a second server bind a port that is already
+    # listening, so a second launch wouldn't notice the running app.
+    allow_reuse_address = os.name != "nt"
     daemon_threads = True
 
     def server_bind(self):

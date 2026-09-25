@@ -163,7 +163,8 @@ def start():
     if _state["running"]:
         return
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if os.name != "nt":             # on Windows SO_REUSEADDR would let a 2nd Blender share the port
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", PORT))
     srv.listen(4)
     srv.settimeout(0.5)

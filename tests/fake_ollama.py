@@ -3,6 +3,7 @@ serves the parts of the Ollama HTTP API that Spark X uses. Installed models
 live in a JSON file next to $OLLAMA_MODELS (or the temp dir)."""
 import json
 import os
+import socketserver
 import sys
 import tempfile
 import time
@@ -100,13 +101,21 @@ class H(BaseHTTPRequestHandler):
         self._json({})
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def server_bind(self):          # skip the slow reverse-DNS lookup (macOS)
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def main():
     if sys.argv[1:2] != ["serve"]:
         print("fake ollama: only 'serve' is supported")
         return 2
     host = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").replace("http://", "")
     h, _, p = host.rpartition(":")
-    ThreadingHTTPServer((h or "127.0.0.1", int(p)), H).serve_forever()
+    Server((h or "127.0.0.1", int(p)), H).serve_forever()
 
 
 if __name__ == "__main__":

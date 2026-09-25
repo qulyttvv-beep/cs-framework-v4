@@ -7,6 +7,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 import cs
 
 
@@ -166,3 +168,14 @@ def test_http_server_skips_reverse_dns(monkeypatch):
         assert srv.server_name == "127.0.0.1" and srv.server_port > 0
     finally:
         srv.server_close()
+
+
+def test_http_server_refuses_a_port_that_is_in_use():
+    """A second launch must see the running app instead of sharing its port
+    (on Windows, SO_REUSEADDR would let both servers bind it)."""
+    first = cs._QuietHTTPServer(("127.0.0.1", 0), cs._ServeHandler)
+    try:
+        with pytest.raises(OSError):
+            cs._QuietHTTPServer(("127.0.0.1", first.server_port), cs._ServeHandler).server_close()
+    finally:
+        first.server_close()
