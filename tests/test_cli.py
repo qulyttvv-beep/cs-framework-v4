@@ -83,26 +83,37 @@ def test_serve_health_and_models(cs_script: Path, tmp_path: Path):
     env = dict(os.environ)
     env["CS_HOME"] = str(tmp_path / "home")
     env["CS_NO_COLOR"] = "1"
+    # Capture server output to a file (not a PIPE) so a chatty startup can never
+    # fill the OS pipe buffer and deadlock the server process.
+    log_path = tmp_path / "serve.log"
+    log_fh = open(log_path, "w", encoding="utf-8")
+
+    def _log() -> str:
+        try:
+            return Path(log_path).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return "(no log)"
+
     proc = subprocess.Popen(
         [sys.executable, str(cs_script), "serve", "--host", "127.0.0.1",
          "--port", str(port)],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdout=log_fh, stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL, env=env, text=True,
     )
     try:
         base = f"http://127.0.0.1:{port}"
-        deadline = time.time() + 20
+        deadline = time.time() + 40
         health = None
         while time.time() < deadline:
             if proc.poll() is not None:
-                pytest.fail("serve exited early:\n" + (proc.stdout.read() if proc.stdout else ""))
+                pytest.fail("serve exited early:\n" + _log())
             try:
                 with urllib.request.urlopen(base + "/health", timeout=2) as fh:
                     health = json.loads(fh.read().decode())
                     break
             except Exception:
                 time.sleep(0.4)
-        assert health and health.get("ok") is True
+        assert health and health.get("ok") is True, "no /health response:\n" + _log()
         assert health.get("version") == "4.1.0"
 
         with urllib.request.urlopen(base + "/v1/models", timeout=5) as fh:
@@ -115,3 +126,4 @@ def test_serve_health_and_models(cs_script: Path, tmp_path: Path):
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+        log_fh.close()

@@ -4896,7 +4896,8 @@ def main():
     # and never blocks a non-interactive shell (CI / pipe / packaged binary).
     _NO_SETUP = {"list", "scan", "doctor", "verify", "ll-log", "bonsai-setup",
                  "config", "perms", "fix", "platforms", "ps", "clean",
-                 "plugin-init", "export", "install", "connect", "rm"}
+                 "plugin-init", "export", "install", "connect", "rm",
+                 "serve", "stop"}
     if a.cmd not in (None, "setup") and a.cmd not in _NO_SETUP \
             and not CFG.get("setup_done"):
         if _interactive():
