@@ -5,38 +5,79 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [4.2.0] — 2026-09-25
 
-The "studio" release: a Claude-desktop-style graphical app, served by the
-framework itself.
+The "studio" release: **CS Studio**, a desktop app in the style of the Claude
+desktop app, inside the same single executable. Version 4.1.0 was never
+published as a release, so its fixes (below) ship here too.
 
 ### Added
-- **`cs studio` — a graphical desktop/web app.** One window with:
-  - **Chat** — streaming replies, markdown + code rendering, saved history, and
-    a model picker spanning local models and connected APIs.
-  - **Artifacts** — code/HTML/SVG in a reply opens in a side panel with live
-    **Preview** and **Code** tabs (sandboxed iframe), Claude-style.
-  - **MCP** — add Model Context Protocol servers (stdio); with **Tools** on, the
-    model calls their tools and the built-in tools in an agentic loop.
-  - **Routines** — schedule prompts (every N minutes or daily) with a run log,
-    driven by an in-app scheduler thread.
-  - **Settings** — per-model context editor, runtime status, API connections,
-    and light/dark theme.
-  - Opens in a native window via `pywebview` when installed, else the browser.
-- **Built-in `cs-echo` demo model** so the app works with zero models installed.
-- New JSON API on the server (`/api/state`, `/api/models`, `/api/context`,
-  `/api/routines`, `/api/mcp`, `/api/chats`, and a streaming `/api/chat`), plus a
-  minimal MCP stdio JSON-RPC client.
-- New logo — an isometric prism mark that reads on light and dark backgrounds.
-- Tests for the app server, endpoints, and streaming; `studio` extra
-  (`pip install cs-framework[studio]`) for `pywebview`.
+- **CS Studio (`cs studio`, or double-click the exe).** A calm dark interface
+  (plus a light theme) modelled on the Claude desktop app, with no gradients:
+  sidebar with recents and search, serif replies, a centred composer, a model
+  picker, and toasts, popovers and modals.
+  - **Chat** with streaming markdown, tables, syntax highlighting, file and image
+    attachments (sent to vision models), copy / retry, and saved history.
+  - **Artifacts**: HTML, SVG and long code blocks open in a side panel with
+    live Preview / Code, copy and download. A gallery collects all of them.
+  - **Code workspace**: open a project folder to get a file tree, viewer and
+    editor, plus an agent that reads, greps, edits and runs commands there.
+  - **Built-in browser** with search, reader mode and "Ask CS about this page";
+    the model can also browse as a tool.
+  - **Computer use**: screenshots (shown inline), mouse, keyboard, scrolling
+    and windows. The libraries are bundled in the release binaries, or run
+    `cs install computer`.
+  - **Tool approvals**: anything that changes something (shell, writes,
+    edits, input control) asks *Allow once / Always allow / Deny* first. The
+    policy can be changed in Settings.
+  - **Connectors (MCP)**: a gallery of common servers, custom commands, and
+    one-click import of your Claude Desktop MCP config.
+  - **Routines**: prompts that run every N minutes or daily, with a run log.
+  - **Settings**: general (theme, accent, font, approvals), providers, models
+    and runtimes (installs, Hugging Face downloads), per-model context,
+    computer use, about.
+- **Providers with genuine free tiers**: Groq, Google Gemini, OpenRouter,
+  Cerebras, Mistral, GitHub Models, Hugging Face, NVIDIA NIM and SambaNova,
+  plus OpenAI, DeepSeek and Together. Each has a *Get key* link, and its model
+  list is discovered automatically. Ollama and LM Studio are detected
+  automatically. Any OpenAI-compatible **custom endpoint** works too, with or
+  without a key. Pollinations is available as an opt-in, clearly labelled
+  keyless option. Keys are never sent back to the UI.
+- **One-click local coder**: downloads Qwen2.5-Coder (1.5B / 7B / 14B GGUF) and
+  llama.cpp, with background jobs and progress in the app.
+- **New 3D app icon**, ray-marched from code (`tools/render_icon.py`) into
+  every PNG size plus `cs.ico` and `cs.icns`. It is embedded in the
+  executables.
+- New `edit` (exact-text replace) and `browse` tools for the coding agent.
+- Built-in **CS Echo** demo model, so the app works with nothing installed.
+- Tests for the Studio security model, provider streaming through a mock
+  OpenAI server, approval allow/deny, the filesystem sandbox, routines, MCP
+  and chats. The release workflow now smoke-tests Studio from each binary.
 
-### Fixed
-- SSE responses now send `Connection: close` and close the socket after the
-  stream, so browsers and read-to-EOF clients get a clean end (previously the
-  `keep-alive` header with no length delimiter could hang a reader).
+### Security
+- Studio binds to `127.0.0.1`. It uses a per-launch session token on every API
+  call, a `Host` allowlist (DNS rebinding), an `Origin` check (CSRF), and
+  `X-Frame-Options: DENY`. Artifacts render in sandboxed iframes, and the
+  browser proxy needs its own token and serves pages with
+  `Content-Security-Policy: sandbox`. File access is limited to the opened
+  project folder.
 
 ### Changed
-- Version bumped to `4.2.0` (codename `studio-4.2`); `serve`/`stop`/`studio`
-  no longer trigger the first-run setup wizard. README documents the app.
+- **One executable.** The Studio frontend ships inside the PyInstaller binary.
+  Double-clicking it on Windows opens Studio in an app window and hides the
+  console. Running it from a terminal gives the CLI.
+- The app opens in a native window (pywebview), an app-mode Edge / Chrome /
+  Chromium window, or the default browser, whichever is available first.
+- Multi-model providers: every model of a connected provider appears as
+  `provider/model`.
+- Release builds target Windows x64, Linux x64 and macOS arm64. The Intel macOS
+  runner was dropped because it stalled the release.
+- Removed duplicate definitions in `cs.py` (`fetch_json`, `fetch_text`,
+  `_find_serve_procs`, `cmd_stop`). `cs stop` / `cs ps` now also find
+  servers started from the packaged executable.
+
+### Fixed
+- SSE responses send `Connection: close` and close the socket after the
+  stream, so readers no longer hang.
+- `serve`, `stop` and `studio` no longer trigger the first-run setup wizard.
 
 ## [4.1.0] — 2026-09-25
 

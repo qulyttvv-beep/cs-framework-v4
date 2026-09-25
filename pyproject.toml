@@ -46,6 +46,10 @@ cs = "cs:main"
 
 [tool.setuptools]
 py-modules = ["cs"]
+packages = ["cs_studio"]
+
+[tool.setuptools.package-data]
+cs_studio = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

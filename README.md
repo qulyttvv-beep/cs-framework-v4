@@ -1,11 +1,12 @@
 <p align="center">
-  <img src="logo.svg" width="160" alt="CS Framework">
+  <img src="assets/icon-256.png" width="160" alt="CS Framework">
 </p>
 
 <h1 align="center">CS Framework</h1>
 
 <p align="center">
-  A single-file portable LLM runner, model manager, and coding-agent hub.
+  A single-file portable LLM runner, model manager, coding-agent hub —<br>
+  and <b>CS Studio</b>, a desktop app for all of it.
 </p>
 
 <p align="center">
@@ -15,17 +16,29 @@
   <img src="https://img.shields.io/badge/version-4.2.0-brightgreen.svg" alt="Version 4.2.0">
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/home.png" width="860" alt="CS Studio">
+</p>
+
 ---
 
 ## What it is
 
-`cs.py` is one file. Drop it anywhere and it becomes a complete local-LLM
-workbench:
+One executable (or one `cs.py`). Double-click it and **CS Studio** opens; run
+it from a terminal and you get the full CLI. Either way it is a complete
+local-LLM workbench:
 
-- **Graphical app (`cs studio`)** — a Claude-desktop-style GUI served by the
-  framework itself: streaming chat, live **artifacts** (HTML/SVG preview),
-  **MCP** tool servers, scheduled **routines**, a model picker, and per-model
-  settings — all in one window, running on your machine.
+- **CS Studio** — a calm, dark desktop app in the style of the Claude desktop
+  app: chat with **artifacts**, a **Code** workspace with an agent that edits
+  your project, a built-in **browser**, **computer use**, **MCP connectors**
+  (imports your Claude Desktop config), scheduled **routines**, and every
+  model — local or cloud — in one picker. [More below](#cs-studio).
+- **Free cloud models** — Groq, Google Gemini, OpenRouter, Cerebras, Mistral,
+  GitHub Models, Hugging Face, NVIDIA NIM and SambaNova all have free tiers:
+  paste a key and every model on that account shows up. Ollama and LM Studio
+  are detected automatically.
+- **Local coder in one click** — download a Qwen2.5-Coder GGUF plus
+  llama.cpp and it's ready to use offline, in the app or in `cs code`.
 - **Model scanning** — finds every `.gguf`, `.safetensors`, `.bin`, and
   `.onnx` across the Hugging Face cache, LM Studio, Ollama, and your own
   folders.
@@ -61,17 +74,22 @@ Grab the single-file executable for your platform from the
 | Windows x64 | `cs-windows-x86_64.exe` |
 | Linux x64 | `cs-linux-x86_64` |
 | macOS (Apple Silicon) | `cs-macos-arm64` |
-| macOS (Intel) | `cs-macos-x86_64` |
+
+**Windows:** double-click `cs-windows-x86_64.exe` — CS Studio opens in its own
+window (the console hides itself). Run it from a terminal instead and you get
+the CLI; `cs studio` opens the app from there too.
 
 ```bash
 # macOS / Linux
 chmod +x cs-linux-x86_64
-./cs-linux-x86_64                 # run it
+./cs-linux-x86_64 studio          # open CS Studio
+./cs-linux-x86_64                 # interactive CLI
 ./cs-linux-x86_64 install-self    # optional: add `cs` to your PATH
 ```
 
-On Windows, rename the download to `cs.exe` and run it from a terminal. Verify
-your download against `SHA256SUMS.txt` published with the release.
+Verify your download against `SHA256SUMS.txt` published with the release. The
+binaries are not code-signed, so Windows SmartScreen / macOS Gatekeeper may ask
+you to confirm the first launch (macOS: right-click → Open).
 
 The binary stores everything in a `cs_data/` folder **next to the executable**,
 so copy the pair to a USB stick or another machine and it all travels together.
@@ -121,7 +139,7 @@ cs
 
 ```
 cs                                     # interactive model chooser
-cs studio                              # ⭐ graphical app (chat/artifacts/MCP/routines)
+cs studio                              # ⭐ CS Studio desktop app
 cs chat  <model>                       # chat
 cs code  <model>                       # tool-augmented coding
 cs run   <model> -p "explain X"        # one-shot prompt
@@ -138,34 +156,94 @@ cs agents launch  claude-code --model <model>
 
 ---
 
-## Desktop app — `cs studio`
+## CS Studio
 
 ```
-cs studio                 # open the app (native window if pywebview is installed,
-                          # otherwise your browser) at http://127.0.0.1:8799
-cs studio --no-open       # just run the server (open the URL yourself)
-cs studio --port 9000 --model "Qwen3-8B"
+cs studio                 # open the app
+cs studio --no-open       # just run it; open http://127.0.0.1:8799 yourself
+cs studio --port 9000 --model "groq/llama-3.3-70b-versatile"
 ```
 
-A Claude-desktop-style graphical app, served by the framework and running
-entirely on your machine:
+CS Studio is a desktop app modelled on the Claude desktop app: a quiet dark
+interface (with a light theme), serif replies, no clutter. It runs entirely on
+your machine, inside the same single executable as the CLI. It opens in its own
+chromeless window: a native one if `pywebview` is installed, otherwise an
+app-mode Edge / Chrome / Chromium window, otherwise your default browser.
 
-- **Chat** — streaming replies with markdown + code rendering, saved chat
-  history, and a model picker across every local model and connected API.
-- **Artifacts** — code/HTML/SVG in a reply open in a side panel with live
-  **Preview** and **Code** tabs (sandboxed), just like Claude artifacts.
-- **MCP** — add Model Context Protocol servers (stdio); toggle **Tools** on and
-  the model can call their tools (and the built-in `bash`/`read`/`write`/… tools)
-  in an agentic loop.
-- **Routines** — schedule prompts to run automatically (every N minutes or daily
-  at a set time) while the app is open, with a run log.
-- **Settings** — edit each model's context (system prompt, sampling, GPU
-  layers), see runtime status, connect API platforms, and switch light/dark.
+<table>
+  <tr>
+    <td><img src="docs/screenshots/artifact.png" alt="Artifacts"></td>
+    <td><img src="docs/screenshots/code.png" alt="Code workspace"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/tools.png" alt="Tool approval"></td>
+    <td><img src="docs/screenshots/browser.png" alt="Built-in browser"></td>
+  </tr>
+</table>
 
-No models installed yet? The app ships with a built-in **CS Echo** demo model so
-you can try it immediately, then `cs pull <repo>` or `cs connect <platform>` for
-the real thing. For a true native window: `pip install pywebview` (or
-`cs install` the `studio` extra).
+**Chat & artifacts.** Streaming replies with markdown, tables and syntax
+highlighting; attach files and images (vision models get the image). HTML, SVG
+and longer code blocks become **artifacts** that open beside the chat with live
+**Preview** / **Code** tabs, copy and download. Every artifact is also collected
+in the **Artifacts** gallery.
+
+**Models from everywhere, in one picker.**
+
+| Where | How |
+|---|---|
+| Local files | Every GGUF / safetensors / ONNX model `cs scan` finds, run with llama.cpp, transformers, … |
+| Free cloud tiers | **Groq, Google Gemini, OpenRouter, Cerebras, Mistral, GitHub Models, Hugging Face, NVIDIA NIM, SambaNova** — *Settings → Providers*: click **Get key**, sign in, paste the key. All models on the account are listed automatically. |
+| Paid APIs | OpenAI, DeepSeek, Together AI |
+| On this machine | **Ollama** and **LM Studio** are detected automatically when they are running |
+| Anything else | **Custom endpoint** — any OpenAI-compatible URL (vLLM, llama-server, LiteLLM, a company gateway …), with or without a key |
+| No signup | Pollinations — an optional, clearly labelled keyless endpoint. It is off until you add it yourself. |
+
+Keys are stored only in your local `cs_data/config.json`, and the app never
+sends them back to the browser. CS Studio does not scrape websites or create
+accounts to get "free tokens". Every provider above offers its free tier
+officially.
+
+**Code workspace.** Open a project folder: file tree, viewer, editor, and an
+agent that reads, greps, edits files and runs commands in that folder. Each
+change it wants to make asks for your approval first. No model? The Code view
+offers a local coder: **Download & set up** fetches Qwen2.5-Coder (1.5B / 7B /
+14B GGUF) and llama.cpp, and after that it works fully offline.
+
+**Tools with approvals.** Turn on tool groups per chat: *Files & terminal*,
+*Web browsing*, *Computer use*, plus any MCP connector. Read-only tools run on their own.
+Anything that changes something (shell, writes, edits, mouse and keyboard)
+shows an **Allow once / Always allow / Deny** prompt. You can change this
+under *Settings → General*.
+
+**Built-in browser.** Search the web or open any address inside the app.
+**Reader** mode turns a page into clean text, and **Ask CS about this page**
+sends that text into a chat. The model can use the same browser as a tool.
+
+**Computer use.** With *Computer use* turned on, the model can take
+screenshots, move and click the mouse, type, scroll, and list and focus
+windows. Screenshots appear inline in the chat. The Windows / macOS / Linux
+binaries bundle the libraries. From source, run `cs install computer`.
+
+**Connectors (MCP).** Add Model Context Protocol servers from a gallery
+(filesystem, memory, fetch, git, time, sequential-thinking) or by command.
+You can also **import your Claude Desktop config** in one click. Their tools
+show up next to the built-in ones, as `server__tool`.
+
+**Routines.** Schedule prompts to run every N minutes or daily at a set time,
+with any model and tools, and a run log.
+
+**Settings.** Theme and accent, per-model context (system prompt, sampling,
+GPU layers, context length), runtime status and installs, Hugging Face
+downloads, and provider connections.
+
+**Try it with nothing installed.** The built-in **CS Echo** demo model lets you
+explore the app (including artifacts) before you connect anything.
+
+**Security.** Studio listens on `127.0.0.1` only. Each launch creates a random
+session token, and every API call must carry it. Requests from other origins
+or with a foreign `Host` header (DNS rebinding) are rejected. Artifacts and
+browsed pages render in sandboxed frames that cannot reach the API. File access
+is limited to the project folder you opened.
 
 ---
 
@@ -183,6 +261,7 @@ cs_data/
 ├── cache/        scan / hash / verify caches
 ├── tools/        downloaded binaries
 ├── plugins/      drop-in runtime and architecture hooks
+├── app/          CS Studio: chats, routines, connectors, window profile
 ├── logs/
 └── agents/       agent connector configs
 ```
@@ -249,6 +328,7 @@ hub              huggingface_hub, hf_transfer
 sentencepiece    sentencepiece, protobuf
 einops           einops
 tiktoken         tiktoken
+computer         mss, pyautogui, pillow (computer use in CS Studio)
 aider            aider-chat
 interpreter      open-interpreter
 ollama           official Ollama install script
@@ -580,8 +660,9 @@ architecture:
 ## FAQ
 
 **Does it phone home?**
-No. Only outbound requests are to Hugging Face and GitHub when you
-explicitly run `hub` or `install` commands.
+No. There is no telemetry. It only makes network requests you ask for:
+Hugging Face and GitHub for `pull` / `install`, the provider APIs you connect,
+and the pages you open in the built-in browser.
 
 **Can I run this offline?**
 Yes. All local models work without network. Only `hub search/download`,
@@ -589,7 +670,9 @@ Yes. All local models work without network. Only `hub search/download`,
 
 **Why single file?**
 Portability. Copy `cs.py` anywhere, run it — no `pip install` of the
-framework itself, no venv, no build.
+framework itself, no venv, no build. (Running from source, keep the
+`cs_studio/` folder next to `cs.py` for the app. The prebuilt executable
+already contains it.)
 
 **Does it support multimodal models?**
 Yes for LLaVA, Qwen2-VL, and similar — the transformers runtime loads
@@ -608,19 +691,26 @@ model's format details.
 ## Build from source
 
 The framework is pure standard library, so building a standalone binary needs
-only PyInstaller:
+only PyInstaller (add `mss pyautogui pillow` to bundle computer use):
 
 ```bash
-pip install pyinstaller
+pip install pyinstaller mss pyautogui pillow
 pyinstaller cs.spec            # -> dist/cs   (dist/cs.exe on Windows)
 ```
 
-Model runtimes (torch, transformers, llama.cpp, …) are **not** bundled — they
-are installed on demand with `cs install`, keeping the binary small (~8 MB).
+The result is **one file** containing the CLI, the server, CS Studio's
+frontend (`cs_studio/static`) and the app icon. Model runtimes (torch,
+transformers, llama.cpp, …) are **not** bundled. They are installed on demand
+with `cs install` (GGUF models use downloaded llama.cpp binaries), which keeps
+the binary small.
 
-Prebuilt binaries for Windows, Linux, and macOS (Intel + Apple Silicon) are
-built and published automatically by the `Release` GitHub Actions workflow
-whenever a `v*` tag is pushed.
+The app icon is rendered from code: `python tools/render_icon.py` ray-marches
+the 3D mark with numpy and writes every PNG size plus `cs.ico` / `cs.icns`
+into `assets/`.
+
+Prebuilt binaries for Windows, Linux, and macOS (Apple Silicon) are built,
+smoke-tested (CLI + Studio) and published by the `Release` GitHub Actions
+workflow, either on a `v*` tag or by running it manually with a tag name.
 
 ## Testing
 
@@ -637,8 +727,9 @@ Windows across Python 3.9–3.12 on every push and pull request.
 1. Fork the repository.
 2. Create a feature branch: `git checkout -b feature/my-thing`.
 3. Run `python cs.py selftest` and `pytest` before opening a PR.
-4. Keep `cs.py` as a single file — no new imports at module scope that
-   aren't wrapped in a try/except.
+4. Keep the framework in `cs.py`, with no new imports at module scope unless
+   they are wrapped in a try/except. CS Studio's frontend is plain
+   HTML/CSS/JS in `cs_studio/static/`, with no build step and no gradients.
 
 ---
 

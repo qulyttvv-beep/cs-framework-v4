@@ -14,6 +14,10 @@ def bundle(out: Path, include_tools=False, include_models=False):
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         z.write(CS_PY, "cs.py")
         z.write(HERE / "logo.svg" if (HERE / "logo.svg").exists() else CS_PY, "logo.svg")
+        # the Studio app's frontend (served by `cs studio`)
+        for f in (HERE / "cs_studio").rglob("*"):
+            if f.is_file() and "__pycache__" not in f.parts:
+                z.write(f, str(f.relative_to(HERE)))
         # README if present
         if (HERE / "README.md").exists():
             z.write(HERE / "README.md", "README.md")
