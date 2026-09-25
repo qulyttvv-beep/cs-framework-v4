@@ -154,3 +154,15 @@ def test_version_matches_readme_badge(repo_root: Path):
 def test_default_context_has_core_keys():
     for key in ("n_ctx", "temperature", "max_new_tokens"):
         assert key in cs.DEFAULT_CONTEXT
+
+
+# ── server startup must not do a reverse-DNS lookup (slow on macOS) ─────────
+def test_http_server_skips_reverse_dns(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("socket.getfqdn must not be called on bind")
+    monkeypatch.setattr(cs.socket, "getfqdn", boom)
+    srv = cs._QuietHTTPServer(("127.0.0.1", 0), cs._ServeHandler)
+    try:
+        assert srv.server_name == "127.0.0.1" and srv.server_port > 0
+    finally:
+        srv.server_close()

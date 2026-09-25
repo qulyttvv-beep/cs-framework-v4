@@ -75,6 +75,8 @@ published as a release, so its fixes (below) ship here too.
   servers started from the packaged executable.
 
 ### Fixed
+- `cs studio` / `cs serve` no longer do a reverse-DNS lookup when they bind,
+  which could delay startup by ~35 s on macOS.
 - SSE responses send `Connection: close` and close the socket after the
   stream, so readers no longer hang.
 - `serve`, `stop` and `studio` no longer trigger the first-run setup wizard.

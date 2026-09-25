@@ -3081,6 +3081,14 @@ class _QuietHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+    def server_bind(self):
+        # HTTPServer.server_bind() calls socket.getfqdn(host), a reverse-DNS
+        # lookup that can stall for ~30 s on macOS before the port is served.
+        # server_name is informational only, so skip the lookup.
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
     def handle_error(self, request, client_address):
         try:
             import sys as _sys
