@@ -33,6 +33,11 @@ def _free_port() -> int:
 
 # ── mock OpenAI-compatible provider ──────────────────────────────────────────
 class _Mock(BaseHTTPRequestHandler):
+    """A tiny OpenAI-compatible provider. mock-a supports native function
+    calling (streamed in pieces, like real providers); mock-b rejects `tools`
+    with HTTP 400 so Spark X has to fall back to the text protocol."""
+    requests: list = []
+
     def log_message(self, *a):
         pass
 
@@ -48,25 +53,44 @@ class _Mock(BaseHTTPRequestHandler):
         else:
             self.send_response(404); self.end_headers()
 
+    def _sse(self, deltas):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        for d in deltas:
+            ev = {"choices": [{"delta": d, "index": 0}]}
+            self.wfile.write(b"data: " + json.dumps(ev).encode() + b"\n\n")
+        self.wfile.write(b"data: [DONE]\n\n")
+
     def do_POST(self):
         req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        _Mock.requests.append(req)
         msgs = req.get("messages", [])
-        got_result = any(m.get("role") == "user" and str(m.get("content", "")).startswith("<tool_result")
+        if req.get("tools") and req.get("model") == "mock-b":
+            body = json.dumps({"error": {"message": "mock-b does not support tools"}}).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        got_result = any(m.get("role") == "tool" or (m.get("role") == "user" and str(m.get("content", "")).startswith("<tool_result"))
                          for m in msgs)
         last = next((str(m.get("content", "")) for m in reversed(msgs) if m.get("role") == "user"), "")
         if got_result:
             reply = "All done."
+        elif "use a tool" in last and req.get("tools"):
+            self._sse([{"content": "Checking."},
+                       {"tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                                        "function": {"name": "bash", "arguments": ""}}]},
+                       {"tool_calls": [{"index": 0, "function": {"arguments": '{"cmd": "echo '}}]},
+                       {"tool_calls": [{"index": 0, "function": {"arguments": 'hello-from-tool"}'}}]}])
+            return
         elif "use a tool" in last:
             reply = 'Checking.\n<tool>{"name":"bash","args":{"cmd":"echo hello-from-tool"}}</tool>'
         else:
             reply = "mock says hi"
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.end_headers()
-        for i in range(0, len(reply), 5):
-            ev = {"choices": [{"delta": {"content": reply[i:i + 5]}, "index": 0}]}
-            self.wfile.write(b"data: " + json.dumps(ev).encode() + b"\n\n")
-        self.wfile.write(b"data: [DONE]\n\n")
+        self._sse([{"content": reply[i:i + 5]} for i in range(0, len(reply), 5)])
 
 
 class _MockServer(ThreadingHTTPServer):
@@ -130,10 +154,10 @@ class Studio:
 
 
 @contextlib.contextmanager
-def _studio(home: Path):
+def _studio(home: Path, extra_env=None):
     port = _free_port()
     home.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, CS_HOME=str(home), CS_NO_COLOR="1", CS_STUDIO_TOKEN=TOKEN)
+    env = dict(os.environ, CS_HOME=str(home), CS_NO_COLOR="1", CS_STUDIO_TOKEN=TOKEN, **(extra_env or {}))
     log = open(home / "studio.log", "w", encoding="utf-8")
     proc = subprocess.Popen([sys.executable, str(ROOT / "cs.py"), "studio", "--no-open",
                              "--host", "127.0.0.1", "--port", str(port)],
@@ -274,6 +298,30 @@ def test_denied_tool_does_not_run(studio, mock_openai):
     assert "declined" in result["result"] and "hello-from-tool" not in result["result"]
 
 
+def test_native_tool_call_sends_schemas(studio, mock_openai):
+    studio.post("/api/providers/connect", {"id": "custom", "name": "Mock", "base_url": mock_openai})
+    _Mock.requests.clear()
+    _tool_chat(studio, allow=True)
+    first = _Mock.requests[0]
+    names = [t["function"]["name"] for t in first.get("tools", [])]
+    assert "bash" in names and "read" in names
+    bash = next(t for t in first["tools"] if t["function"]["name"] == "bash")
+    assert bash["function"]["parameters"]["required"] == ["cmd"]
+    second = _Mock.requests[1]["messages"]
+    assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in second)
+    assert any(m.get("role") == "tool" and "hello-from-tool" in m.get("content", "") for m in second)
+
+
+def test_text_protocol_fallback_when_tools_unsupported(studio, mock_openai):
+    studio.post("/api/providers/connect", {"id": "custom", "name": "Mock", "base_url": mock_openai})
+    events = studio.chat({"model": "mock/mock-b", "tools": {"code": True}, "allowed": ["bash"],
+                          "messages": [{"role": "user", "content": "please use a tool"}]})
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert "hello-from-tool" in result["result"]
+    assert "All done." in "".join(e["text"] for e in events if e["type"] == "token")
+    assert not any(e["type"] == "error" for e in events)
+
+
 def test_tools_off_means_no_execution(studio, mock_openai):
     studio.post("/api/providers/connect", {"id": "custom", "name": "Mock", "base_url": mock_openai})
     events = studio.chat({"model": "mock/mock-a", "messages": [{"role": "user", "content": "please use a tool"}]})
@@ -309,7 +357,7 @@ def test_routine_crud(studio):
     rs = studio.get("/api/routines")[1]["routines"]
     assert len(rs) == 1
     run = studio.post("/api/routines/run", {"id": rs[0]["id"]})[1]
-    assert run["ok"] and "CS Echo" in run["output"]
+    assert run["ok"] and "Spark Echo" in run["output"]
     studio.post("/api/routines/delete", {"id": rs[0]["id"]})
     assert studio.get("/api/routines")[1]["routines"] == []
 
@@ -337,7 +385,7 @@ def test_demo_reply_variants():
     py = cs._demo_reply([{"role": "user", "content": "write a python function"}])
     assert "```python" in py
     plain = cs._demo_reply([{"role": "user", "content": "a quick guide please"}])  # 'ui' inside a word
-    assert "```" not in plain and "CS Echo" in plain
+    assert "```" not in plain and "Spark Echo" in plain
 
 
 def test_fs_resolve_rejects_escape(tmp_path):

@@ -1,4 +1,4 @@
-/* CS Studio — frontend. Vanilla JS, no build step, works offline. */
+/* Spark X — frontend. Vanilla JS, no build step, works offline. */
 "use strict";
 
 const TOKEN = document.querySelector('meta[name="cs-token"]').content;
@@ -268,14 +268,14 @@ function renderSide() {
   const user = (S.st && S.st.user) || "you";
   const list = S.chats.filter((c) => c.kind !== "code" && (!S.search || c.title.toLowerCase().includes(S.search.toLowerCase())));
   $("#side").innerHTML = `
-    <div class="side-head"><div class="brand">${mark()}<span>CS</span></div>
+    <div class="side-head"><div class="brand">${mark()}<span>Spark X</span></div>
       <button class="icon-btn" data-act="toggle-side" title="Close sidebar (Ctrl+B)">${icon("panel")}</button></div>
     <button class="new-chat" data-act="new-chat"><span class="plus">${icon("plus")}</span>New chat</button>
     <nav class="nav">${NAV.map(([v, ic, lbl]) => `<button class="nav-item ${S.view === v ? "active" : ""}" data-act="go" data-v="${v}">${icon(ic)}<span>${lbl}</span>${v === "routines" && S.routinesOn ? `<span class="badge">${S.routinesOn}</span>` : ""}</button>`).join("")}</nav>
     <div class="side-label">Recents</div>
     <div class="side-search">${icon("search", "sm")}<input id="side-q" placeholder="Search chats" value="${esc(S.search)}"></div>
     <div class="recents">${list.length ? list.map((c) => `<div class="chat-link ${S.view === "chat" && S.chat.id === c.id ? "active" : ""}" data-act="open-chat" data-id="${esc(c.id)}"><span>${esc(c.title || "Untitled")}</span><button class="del" data-act="del-chat" data-id="${esc(c.id)}" title="Delete">${icon("x", "sm")}</button></div>`).join("") : `<div class="side-empty">${S.search ? "No matches" : "Your chats will appear here"}</div>`}</div>
-    <div class="side-foot"><div class="avatar">${esc(user.slice(0, 1))}</div><div class="who"><b>${esc(user)}</b><small>CS Framework ${esc(S.st ? S.st.version : "")}</small></div>
+    <div class="side-foot"><div class="avatar">${esc(user.slice(0, 1))}</div><div class="who"><b>${esc(user)}</b><small>Spark X ${esc(S.st ? S.st.version : "")}</small></div>
       <button class="icon-btn" data-act="go" data-v="settings" title="Settings (Ctrl+,)">${icon("gear")}</button></div>`;
   const q = $("#side-q");
   q.addEventListener("input", () => { S.search = q.value; const pos = q.selectionStart; renderSide(); const n = $("#side-q"); n.focus(); n.setSelectionRange(pos, pos); });
@@ -336,6 +336,8 @@ function pickDefaultModel() {
   if (pref && ms.find((m) => m.id === pref)) return pref;
   const local = ms.find((m) => m.local && m.kind !== "demo" && m.ready);
   if (local) return local.id;
+  const free = ms.find((m) => m.auto);
+  if (free) return free.id;
   const api_ = ms.find((m) => m.kind === "api");
   return api_ ? api_.id : (S.st.demo_model || "cs-echo");
 }
@@ -362,19 +364,28 @@ function greeting() {
 }
 function viewChat(el) {
   if (!S.chat.messages.length) {
-    const demo = S.model === (S.st && S.st.demo_model) && !models().some((m) => m.kind !== "demo");
+    const onlyDemo = !models().some((m) => m.kind !== "demo");
     el.innerHTML = `<div class="hello-wrap">
       <div class="hello">${mark()}<h1>${esc(greeting())}</h1></div>
       <div id="composer-chat" class="composer-dock"></div>
       <div class="chips">${CHIPS.map((c, i) => `<button class="${S.chipOpen === i ? "on" : ""}" data-act="chip" data-i="${i}">${icon(c.i, "sm")}${c.k}</button>`).join("")}</div>
       ${S.chipOpen !== null ? `<div class="suggest">${CHIPS[S.chipOpen].s.map((s, j) => `<button data-act="suggest" data-i="${S.chipOpen}" data-j="${j}">${esc(s)}</button>`).join("")}</div>` : ""}
-      ${demo ? `<div class="demo-note">You're using the built-in demo model. <a data-act="go" data-v="settings" data-tab="providers">Connect a free provider</a> or <a data-act="go" data-v="code">set up a local model</a> for real answers.</div>` : ""}
+      ${onlyDemo ? onboardHTML() : ""}
     </div>`;
   } else {
     el.innerHTML = `<div class="thread" id="thread-chat"><div class="msgs" id="msgs-chat"></div></div><div id="composer-chat" class="composer-dock"></div>`;
     renderThread("chat");
   }
   renderComposer("chat");
+}
+
+function onboardHTML() {
+  const ol = S.st.ollama || {};
+  return `<div class="onboard"><div class="onboard-title">Choose how Spark X thinks</div><div class="onboard-grid">
+    <button class="ob-card primary" data-act="free-enable">${icon("bolt")}<b>Free model</b><span>Start now, no account. Spark X finds a free public AI service; your messages are sent to it.</span></button>
+    <button class="ob-card" data-act="go" data-v="settings" data-tab="models">${icon("box")}<b>Local with Ollama</b><span>${ol.installed ? "Private and offline. Pick a model suggested for your computer." : "Private and offline. Install Ollama, then pick a suggested model."}</span></button>
+    <button class="ob-card" data-act="go" data-v="settings" data-tab="providers">${icon("cloud")}<b>Free API key</b><span>Groq, Gemini, OpenRouter and more — faster, smarter free tiers.</span></button>
+  </div></div>`;
 }
 
 function chatFor(scope) { return scope === "code" ? S.codeChat : S.chat; }
@@ -401,11 +412,14 @@ function msgHTML(m, i, scope, streaming) {
     if (s.t === "text") {
       const txt = cleanText(s.v, streaming);
       if (txt.trim()) { visible = true; html += md(txt, `${keyBase}:${si}`, streaming, streaming ? (k) => autoOpenArt(m, k) : null); }
+    } else if (s.t === "think") {
+      const active = streaming && m.segs.slice(si + 1).every((x) => x.t === "text" && !x.v.trim());
+      if (s.v.trim()) html += `<details class="think" ${active ? "open" : ""}><summary>${active ? "Thinking…" : "Thought process"}</summary><div>${esc(s.v.trim())}</div></details>`;
     } else { visible = true; html += toolHTML(s, scope); }
   });
   if (m.error) html += `<div class="err">${esc(m.error)}</div>`;
   if (streaming) html += `<span class="cursor-mark">${mark("busy")}</span>`;
-  const meta = m.model ? esc(modelLabel(m.model)) : "";
+  const meta = m.model ? esc(modelLabel(m.model)) + (m.via ? ` · via ${esc(m.via)}` : "") : "";
   const foot = streaming ? "" : `<div class="msg-foot">
       <button class="icon-btn" data-act="copy-msg" data-scope="${scope}" data-i="${i}" title="Copy">${icon("copy", "sm")}</button>
       ${i === chat.messages.length - 1 ? `<button class="icon-btn" data-act="retry" data-scope="${scope}" title="Retry">${icon("refresh", "sm")}</button>` : ""}
@@ -446,9 +460,38 @@ const TOOL_TXT = {
   app_start: ["open an app", "Opening an app", "Opened an app"], sleep: ["wait", "Waiting", "Waited"],
   ocr: ["read text on screen", "Reading the screen", "Read text on screen"], clip_read: ["read the clipboard", "Reading the clipboard", "Read the clipboard"],
   clip_write: ["write to the clipboard", "Writing the clipboard", "Wrote to the clipboard"] };
-function toolLabel(s) {
+const CU_TXT = {
+  screenshot: ["look at the screen", "Looking at the screen", "Looked at the screen"], click: ["click", "Clicking", "Clicked"],
+  double_click: ["double-click", "Double-clicking", "Double-clicked"], right_click: ["right-click", "Right-clicking", "Right-clicked"],
+  middle_click: ["middle-click", "Middle-clicking", "Middle-clicked"], move: ["move the mouse", "Moving the mouse", "Moved the mouse"],
+  drag: ["drag", "Dragging", "Dragged"], scroll: ["scroll", "Scrolling", "Scrolled"], type: ["type", "Typing", "Typed"],
+  key: ["press keys", "Pressing keys", "Pressed keys"], wait: ["wait", "Waiting", "Waited"],
+  cursor_position: ["find the mouse", "Finding the mouse", "Found the mouse"] };
+const BL_TXT = {
+  run: ["run a Blender script", "Building in Blender", "Built in Blender"], live: ["change your open Blender scene", "Editing your Blender scene", "Edited your Blender scene"],
+  status: ["check Blender", "Checking Blender", "Checked Blender"], open: ["open Blender", "Opening Blender", "Opened Blender"],
+  install_bridge: ["install the Blender bridge", "Installing the Blender bridge", "Installed the Blender bridge"] };
+Object.assign(TOOL_TXT, { open: ["open something", "Opening", "Opened"] });
+function toolWords(s) {
+  const a = s.args || {};
+  if (s.name === "computer") return CU_TXT[a.action || "screenshot"] || CU_TXT.screenshot;
+  if (s.name === "blender") return BL_TXT[a.action || "run"] || BL_TXT.run;
   const nm = s.name.includes("__") ? s.name.split("__").pop() : s.name;
-  const t = TOOL_TXT[s.name] || [`use ${nm}`, `Using ${nm}`, `Used ${nm}`];
+  return TOOL_TXT[s.name] || [`use ${nm}`, `Using ${nm}`, `Used ${nm}`];
+}
+function approvalText(s) {
+  const a = s.args || {}, t = toolWords(s);
+  let d = "";
+  if (s.name === "bash") d = ` <code>${esc(String(a.cmd || "").slice(0, 140))}</code>`;
+  else if (s.name === "computer" && a.x != null) d = ` at (${esc(a.x)}, ${esc(a.y)})${a.action === "drag" ? ` to (${esc(a.to_x)}, ${esc(a.to_y)})` : ""}`;
+  else if (s.name === "computer" && a.action === "type") d = ` “${esc(String(a.text || "").slice(0, 80))}”`;
+  else if (s.name === "computer" && a.action === "key") d = ` <code>${esc(a.keys || a.key || "")}</code>`;
+  else if (s.name === "open") d = ` <code>${esc(a.target || "")}</code>`;
+  else if (["write", "edit", "read"].includes(s.name)) d = ` <code>${esc(a.path || "")}</code>`;
+  return `Allow Spark X to ${t[0]}${d}?`;
+}
+function toolLabel(s) {
+  const t = toolWords(s);
   if (s.status === "waiting") return "Wants to " + t[0];
   if (s.status === "running") return t[1] + "…";
   if (s.status === "denied") return "Declined: " + t[0];
@@ -456,6 +499,9 @@ function toolLabel(s) {
 }
 function toolIcon(n) {
   if (n.includes("__")) return "plug";
+  if (n === "computer") return "pointer";
+  if (n === "open") return "ext";
+  if (n === "blender") return "box";
   if (["bash", "python"].includes(n)) return "terminal";
   if (["read", "write", "edit", "append", "wc", "diff"].includes(n)) return "file";
   if (["ls", "tree", "glob", "grep", "find"].includes(n)) return "search";
@@ -464,22 +510,36 @@ function toolIcon(n) {
 }
 function toolArg(a) {
   if (!a || typeof a !== "object") return "";
+  if (a.action) {                                   // computer / blender
+    if (a.x != null) return `${a.x}, ${a.y}`;
+    if (a.action === "type") return `“${String(a.text || "").slice(0, 60)}”`;
+    if (a.action === "key") return String(a.keys || a.key || "");
+    if (a.action === "scroll") return String(a.direction || "down");
+    if (a.code) return String(a.code).split("\n").find((l) => l.trim() && !l.trim().startsWith("#")) || "";
+    return String(a.path || a.blend_file || "");
+  }
+  if (a.target) return String(a.target);
   return String(a.cmd ?? a.path ?? a.url ?? a.pattern ?? a.query ?? a.text ?? a.keys ?? a.title ?? a.name ?? (a.x != null ? `${a.x}, ${a.y}` : "") ?? "") || JSON.stringify(a).slice(0, 90);
 }
 function toolHTML(s, scope) {
   const label = toolLabel(s);
   const st = s.status === "running" ? '<div class="spin"></div>' : s.status === "waiting" ? icon("key", "sm")
     : s.status === "denied" || (s.result || "").startsWith("[tool error") ? '<span class="dot-bad"></span>' : '<span class="dot-ok"></span>';
-  const approval = s.status === "waiting" && s.approval ? `<div class="approve"><p>Allow <b>${esc(s.name)}</b> to run${s.name === "bash" ? ` <code>${esc(String(s.args.cmd || "").slice(0, 140))}</code>` : ""}?</p>
+  const approval = s.status === "waiting" && s.approval ? `<div class="approve"><p>${approvalText(s)}</p>
     <div class="row"><button class="btn ghost sm" data-act="approve" data-id="${s.approval}" data-allow="0">Deny</button>
     <button class="btn secondary sm" data-act="approve" data-id="${s.approval}" data-allow="1" data-always="1">Always allow</button>
     <button class="btn primary sm" data-act="approve" data-id="${s.approval}" data-allow="1">Allow once</button></div></div>` : "";
-  const open = s.open || s.status === "waiting";
+  // a rendered image (Blender) is the point of the step: show it without a click
+  const open = s.open ?? (s.status === "waiting" || (s.name === "blender" && !!s.image));
+  const { code, content, ...rest } = s.args || {};
+  const big = code ?? content;
+  const input = `${Object.keys(rest).length ? `<pre>${esc(JSON.stringify(rest, null, 2))}</pre>` : ""}${big != null ? `<pre class="code-arg">${highlight(String(big), code != null ? "python" : String(rest.path || "").split(".").pop())}</pre>` : ""}`;
+  const inp = `<div class="lbl">Input</div>${input || "<pre>{}</pre>"}`;
+  const res = s.result != null ? `<div class="lbl">Result</div><pre>${esc(s.result)}</pre>` : "";
+  const img = s.image ? `<img src="${esc(s.image)}" alt="${s.name === "blender" ? "render" : "screenshot"}">` : "";
   return `<div class="tool ${open ? "open" : ""}" data-tid="${esc(s.id)}">
-    <div class="tool-row" data-act="toggle-tool" data-scope="${scope}" data-id="${esc(s.id)}">${st}${icon(toolIcon(s.name), "sm")}<span class="name">${esc(label)}</span><span class="arg">${esc(toolArg(s.args))}</span>${icon("right", "sm chev")}</div>
-    <div class="tool-body"><div class="lbl">Input</div><pre>${esc(JSON.stringify(s.args || {}, null, 2))}</pre>
-    ${s.result != null ? `<div class="lbl">Result</div><pre>${esc(s.result)}</pre>` : ""}
-    ${s.image ? `<img src="${esc(s.image)}" alt="screenshot">` : ""}</div>${approval}</div>`;
+    <div class="tool-row" data-act="toggle-tool" data-scope="${scope}" data-id="${esc(s.id)}">${st}${icon(toolIcon(s.name), "sm")}<span class="name">${esc(label)}</span><span class="arg">${esc(toolArg(s.args))}</span>${s.image && !open ? `<img class="thumb" src="${esc(s.image)}" alt="">` : ""}${icon("right", "sm chev")}</div>
+    <div class="tool-body">${s.image ? img + res + inp : inp + res}</div>${approval}</div>`;
 }
 
 /* ─────────────────────────── composer ─────────────────────────── */
@@ -493,19 +553,20 @@ function renderComposer(scope) {
   if (scope === "chat" && t.code) chips.push(["terminal", "Files"]);
   if (t.web) chips.push(["globe", "Web"]);
   if (t.computer) chips.push(["monitor", "Computer"]);
+  if (t.blender) chips.push(["box", "Blender"]);
   if (t.mcp && t.mcp.length) chips.push(["plug", `${t.mcp.length} connector${t.mcp.length > 1 ? "s" : ""}`]);
   const live = !!S.stream[scope];
   const atts = S.att[scope].map((a, i) => `<div class="att">${a.type === "image" ? `<img src="${esc(a.data_url)}" alt="">` : icon("file", "sm")}<span>${esc(a.name)}</span><button data-act="rm-att" data-scope="${scope}" data-i="${i}">${icon("x", "sm")}</button></div>`).join("");
   host.innerHTML = `<div class="inner"><div class="composer">
     ${atts ? `<div class="att-row">${atts}</div>` : ""}
-    <textarea id="ta-${scope}" rows="1" placeholder="${scope === "code" ? "Ask CS to build, fix or explain…" : "How can I help you today?"}"></textarea>
+    <textarea id="ta-${scope}" rows="1" placeholder="${scope === "code" ? "Ask Spark X to build, fix or explain…" : "How can I help you today?"}"></textarea>
     <div class="composer-bar">
       <button class="icon-btn" data-act="attach" data-scope="${scope}" title="Add files, a screenshot or a web page">${icon("plus")}</button>
       <button class="icon-btn ${chips.length ? "on" : ""}" data-act="tools-menu" data-scope="${scope}" title="Tools">${icon("sliders")}</button>
       ${chips.map(([ic, l]) => `<span class="chip-tool">${icon(ic, "sm")}${esc(l)}</span>`).join("")}
       <button class="model-btn" data-act="model-menu" data-scope="${scope}" title="Choose model"><span>${esc(modelLabel(S.model))}</span>${icon("down", "sm")}</button>
       <button class="send ${live ? "stop" : ""}" id="send-${scope}" data-act="${live ? "stop" : "send"}" data-scope="${scope}" title="${live ? "Stop" : "Send"}">${icon(live ? "stop" : "up")}</button>
-    </div></div>${scope === "chat" && S.chat.messages.length ? `<div class="hint">CS can make mistakes. Check important information.</div>` : ""}</div>`;
+    </div></div>${scope === "chat" && S.chat.messages.length ? `<div class="hint">Spark X can make mistakes. Check important information.</div>` : ""}</div>`;
   const ta = $(`#ta-${scope}`);
   ta.value = value;
   const size = () => { ta.style.height = "auto"; ta.style.height = Math.min(280, ta.scrollHeight) + "px"; syncSend(scope); };
@@ -571,7 +632,8 @@ async function runStream(scope) {
   const body = {
     model: S.model, stream_id: sid, mode: scope,
     cwd: scope === "code" && S.project ? S.project.root : undefined,
-    tools: { code: scope === "code" ? true : !!t.code, web: !!t.web, computer: !!t.computer, mcp: t.mcp || [] },
+    tools: { code: scope === "code" ? true : !!t.code, web: !!t.web, computer: !!t.computer, blender: !!t.blender, mcp: t.mcp || [] },
+    allowed: chat.allowed || [],
     messages: chat.messages.slice(0, -1).map((x) => ({ role: x.role, content: x.content, attachments: x.attachments })),
   };
   let changedFiles = false;
@@ -595,6 +657,12 @@ async function runStream(scope) {
           m.content += ev.text;
           const last = m.segs[m.segs.length - 1];
           if (last.t === "text") last.v += ev.text; else m.segs.push({ t: "text", v: ev.text });
+        } else if (ev.type === "think") {
+          const n = m.segs.length, last = m.segs[n - 1], prev = m.segs[n - 2];
+          if (last && last.t === "text" && !last.v && prev && prev.t === "think") prev.v += ev.text;
+          else { if (last && last.t === "text" && !last.v) m.segs.pop(); m.segs.push({ t: "think", v: ev.text }, { t: "text", v: "" }); }
+        } else if (ev.type === "provider") { m.via = ev.name;
+        } else if (ev.type === "allowed") { chat.allowed = ev.tools || [];
         } else if (ev.type === "tool_call") {
           m.segs.push({ t: "tool", id: ev.id, name: ev.name, args: ev.args || {}, status: "running" });
           m.segs.push({ t: "text", v: "" });
@@ -676,9 +744,9 @@ function modelMenu(anchor, scope) {
   const ms = models();
   const groups = {};
   for (const m of ms) (groups[m.group || "Other"] = groups[m.group || "Other"] || []).push(m);
-  const order = ["Local", ...Object.keys(groups).filter((g) => g !== "Local" && g !== "Built-in"), "Built-in"].filter((g) => groups[g]);
+  const order = ["Free", "Local", "Ollama", ...Object.keys(groups).filter((g) => !["Free", "Local", "Ollama", "Built-in"].includes(g)), "Built-in"].filter((g) => groups[g]);
   const item = (m) => `<button class="mi" data-act="pick-model" data-id="${esc(m.id)}" data-scope="${scope}">
-      <div class="lbl">${esc(m.name)}${(() => { const sub = m.kind === "api" ? "" : m.kind === "demo" ? "Echoes back — for trying the app" : [m.runtime, m.size, m.arch].filter(Boolean).join(" · "); return sub ? `<span class="sub">${esc(sub)}</span>` : ""; })()}</div>
+      <div class="lbl">${esc(m.name)}${(() => { const sub = m.auto ? (m.via ? `No signup · via ${m.via}` : "No signup · picks a free service") : m.kind === "api" ? "" : m.kind === "demo" ? "Echoes back — for trying the app" : [m.runtime, m.size, m.arch].filter(Boolean).join(" · "); return sub ? `<span class="sub">${esc(sub)}</span>` : ""; })()}</div>
       ${m.free ? '<span class="badge free">free</span>' : ""}${m.vision ? '<span class="badge">vision</span>' : ""}${m.kind !== "api" && m.kind !== "demo" && !m.ready ? '<span class="badge warn">no runtime</span>' : ""}
       ${m.id === S.model ? `<span class="check">${icon("check", "sm")}</span>` : ""}</button>`;
   const list = (q) => order.map((g) => {
@@ -687,8 +755,9 @@ function modelMenu(anchor, scope) {
   }).join("") || `<div class="grp">No models match</div>`;
   const p = pop(anchor, `<div class="search"><input placeholder="Search models" id="mq"></div><div class="scroll" id="ml">${list("")}</div>
     <div class="sep"></div>
-    <button class="mi" data-act="go" data-v="settings" data-tab="providers">${icon("cloud", "sm")}<div class="lbl">Add free cloud models</div></button>
-    <button class="mi" data-act="go" data-v="code">${icon("download", "sm")}<div class="lbl">Set up a local model</div></button>`, { width: 360 });
+    ${S.st.free_enabled ? "" : `<button class="mi" data-act="free-enable">${icon("bolt", "sm")}<div class="lbl">Use a free model<span class="sub">No signup — Spark X finds a free service</span></div></button>`}
+    <button class="mi" data-act="go" data-v="settings" data-tab="models">${icon("download", "sm")}<div class="lbl">Get a local model<span class="sub">Suggestions for your computer, via Ollama</span></div></button>
+    <button class="mi" data-act="go" data-v="settings" data-tab="providers">${icon("cloud", "sm")}<div class="lbl">Connect a provider</div></button>`, { width: 360 });
   const q = $("#mq", p);
   q.addEventListener("input", () => { $("#ml", p).innerHTML = list(q.value.toLowerCase().trim()); });
   setTimeout(() => q.focus(), 20);
@@ -702,7 +771,8 @@ function toolsMenu(anchor, scope) {
   pop(anchor, `
     ${row("code", "terminal", "Files & terminal", scope === "code" ? "Always on in Code" : "Read, write and run commands", scope === "code" || t.code, scope === "code")}
     ${row("web", "globe", "Web browsing", "Open pages and read them", t.web)}
-    ${row("computer", "pointer", "Computer use", comp.available ? "See the screen, move the mouse, type" : "Needs setup — see Settings", t.computer, !comp.available)}
+    ${row("computer", "pointer", "Computer use", comp.available ? "See the screen, use the mouse and keyboard, open apps" : "Needs setup — see Settings", t.computer, !comp.available)}
+    ${row("blender", "box", "Blender", S.st.blender_found ? "Build and render 3D scenes with Python" : "Blender wasn't found on this computer", t.blender, !S.st.blender_found)}
     <div class="sep"></div><div class="grp">Connectors</div>
     ${servers.length ? servers.map((s) => `<button class="mi" data-act="toggle-mcp" data-id="${esc(s.id)}" data-scope="${scope}">${icon("plug", "sm")}<div class="lbl">${esc(s.name || s.id)}</div><span class="switch ${(t.mcp || []).includes(s.id) ? "on" : ""}"></span></button>`).join("") : `<div class="mi disabled"><div class="lbl"><span class="sub">No connectors yet</span></div></div>`}
     <div class="sep"></div><button class="mi" data-act="go" data-v="connectors">${icon("plug", "sm")}<div class="lbl">Manage connectors</div></button>`, { width: 320 });
@@ -753,8 +823,8 @@ function viewCode(el) {
     const presets = st.coder_presets || {};
     el.innerHTML = `<div class="page"><div class="page-in">
       <div class="page-head"><h2>Code</h2></div>
-      <div class="page-sub">Open a folder and work with CS like a pair programmer — it can read, edit and run code in that project, asking before anything risky.</div>
-      <div class="card card-row"><div class="grow"><h4>${icon("folder", "sm")}Open a project folder</h4><div class="muted">CS only reads and writes inside the folder you choose.</div></div>
+      <div class="page-sub">Open a folder and work with Spark X like a pair programmer — it can read, edit and run code in that project, asking before anything risky.</div>
+      <div class="card card-row"><div class="grow"><h4>${icon("folder", "sm")}Open a project folder</h4><div class="muted">Spark X only reads and writes inside the folder you choose.</div></div>
         <button class="btn primary" data-act="pick-project">${icon("folder", "sm")}Open folder</button></div>
       ${recents.length ? `<div class="section-title">Recent</div>${recents.map((r) => `<div class="card card-row" style="padding:10px 14px;cursor:pointer" data-act="open-project" data-root="${esc(r)}">${icon("folder", "sm")}<div class="grow"><b style="font-weight:500">${esc(r.split(/[\\/]/).filter(Boolean).pop() || r)}</b><div class="kv">${esc(r)}</div></div>${icon("right", "sm")}</div>`).join("")}` : ""}
       <div class="section-title">Local coding model</div>
@@ -875,9 +945,10 @@ function jobsFor(filter) {
 }
 function coderJobsHTML() { return `<div id="jobs-box" data-filter="coder|Download|Install">${jobsFor("coder|Download|Install")}</div>`; }
 function jobHTML(j) {
-  const pct = j.bytes && j.expect ? clamp(j.bytes / j.expect * 100, 0, 99) : null;
+  const pct = j.progress != null ? clamp(j.progress * 100, 0, 100) : j.bytes && j.expect ? clamp(j.bytes / j.expect * 100, 0, 99) : null;
   return `<div class="card" style="margin:12px 0 0"><h4>${j.status === "running" ? '<div class="spin"></div>' : j.status === "done" ? '<span class="dot-ok"></span>' : '<span class="dot-bad"></span>'}${esc(j.title)}</h4>
-    <div class="muted">${j.status === "running" ? `Step ${j.step} of ${j.steps}${j.bytes ? ` · ${(j.bytes / 1e9).toFixed(2)} GB` : ""}` : j.status === "done" ? "Finished — the model is in the model menu." : esc(j.error || "Failed")}</div>
+    <div class="muted">${j.status === "running" ? (j.kind === "ollama-pull" ? `${pct != null ? Math.round(pct) + "%" : "Starting"}` : `Step ${j.step} of ${j.steps}${j.bytes ? ` · ${(j.bytes / 1e9).toFixed(2)} GB` : ""}`) : j.status === "done" ? "Finished — the model is in the model menu." : esc(j.error || "Failed")}
+      ${j.status === "running" && j.kind === "ollama-pull" ? `<button class="btn ghost sm" style="float:right;margin-top:-4px" data-act="job-cancel" data-id="${esc(j.id)}">Cancel</button>` : ""}</div>
     ${j.status === "running" ? `<div class="bar ${pct === null ? "indet" : ""}"><i style="${pct !== null ? `width:${pct}%` : ""}"></i></div>` : ""}
     ${j.log && j.log.length ? `<div class="out">${esc(j.log.slice(-6).join("\n"))}</div>` : ""}</div>`;
 }
@@ -900,6 +971,7 @@ function pollJobs() {
         if (n.status !== "running") {
           toast(n.status === "done" ? `Done: ${n.title}` : `Failed: ${n.title}`, n.status !== "done");
           await refreshState();
+          if (S.view === "settings" && S.settingsTab === "models") tabModels($("#stab"));
         }
       } catch (e) {}
     }
@@ -928,7 +1000,7 @@ function viewBrowser(el) {
       <button class="icon-btn" data-act="b-reload" title="Reload">${icon("refresh")}</button>
       <div class="url">${icon("search", "sm")}<input id="b-url" value="${esc(B.url)}" placeholder="Search or enter an address" spellcheck="false"></div>
       <button class="icon-btn ${B.reader ? "active" : ""}" data-act="b-reader" title="Reader view" ${B.url ? "" : "disabled"}>${icon("book")}</button>
-      <button class="btn secondary sm" data-act="b-ask" ${B.url ? "" : "disabled"}>${icon("chat", "sm")}Ask CS about this page</button>
+      <button class="btn secondary sm" data-act="b-ask" ${B.url ? "" : "disabled"}>${icon("chat", "sm")}Ask Spark X about this page</button>
       <button class="icon-btn" data-act="b-ext" title="Open in your browser" ${B.url ? "" : "disabled"}>${icon("ext")}</button>
     </div>
     <div class="bframe" id="bframe"></div></div>`;
@@ -977,11 +1049,11 @@ window.addEventListener("message", (e) => {
 /* ─────────────────────────── artifacts gallery ─────────────────────────── */
 async function viewArtifacts(el) {
   el.innerHTML = `<div class="page"><div class="page-in"><div class="page-head"><h2>Artifacts</h2></div>
-    <div class="page-sub">Everything CS has made for you — pages, graphics and programs from your chats.</div><div id="arts"><div class="spin"></div></div></div></div>`;
+    <div class="page-sub">Everything Spark X has made for you — pages, graphics and programs from your chats.</div><div id="arts"><div class="spin"></div></div></div></div>`;
   let arts = [];
   try { arts = (await api("/api/artifacts")).artifacts; } catch (e) {}
   const box = $("#arts"); if (!box) return;
-  if (!arts.length) { box.innerHTML = `<div class="empty-state">${mark()}<h3>No artifacts yet</h3><div>Ask CS for a web page, an SVG or a script and it will show up here.</div></div>`; return; }
+  if (!arts.length) { box.innerHTML = `<div class="empty-state">${mark()}<h3>No artifacts yet</h3><div>Ask Spark X for a web page, an SVG or a script and it will show up here.</div></div>`; return; }
   box.innerHTML = `<div class="art-grid">${arts.map((a, i) => {
     const key = "gallery:" + a.key; ART.set(key, { lang: a.lang, code: a.code, title: a.title, lines: a.lines });
     const thumb = PREVIEW.includes(a.lang)
@@ -994,7 +1066,7 @@ async function viewArtifacts(el) {
 /* ─────────────────────────── routines ─────────────────────────── */
 async function viewRoutines(el) {
   el.innerHTML = `<div class="page"><div class="page-in"><div class="page-head"><h2>Routines</h2><button class="btn primary" data-act="new-routine">${icon("plus", "sm")}New routine</button></div>
-    <div class="page-sub">Prompts that run on a schedule while CS Studio is open. Results are kept here.</div><div id="rl"><div class="spin"></div></div></div></div>`;
+    <div class="page-sub">Prompts that run on a schedule while Spark X is open. Results are kept here.</div><div id="rl"><div class="spin"></div></div></div></div>`;
   let rs = [];
   try { rs = (await api("/api/routines")).routines; } catch (e) {}
   S.routines = rs;
@@ -1021,7 +1093,7 @@ function routineModal(r) {
   const daily = !r.every_minutes;
   const back = modal(r.id ? "Edit routine" : "New routine", `
     <div class="field"><label>Name</label><input class="input" id="r-name" value="${esc(r.name)}" placeholder="Morning briefing"></div>
-    <div class="field"><label>What should CS do?</label><textarea class="textarea" id="r-prompt" placeholder="Give me three priorities for today…">${esc(r.prompt)}</textarea></div>
+    <div class="field"><label>What should Spark X do?</label><textarea class="textarea" id="r-prompt" placeholder="Give me three priorities for today…">${esc(r.prompt)}</textarea></div>
     <div class="field"><label>Model</label><select class="select" id="r-model">${models().map((m) => `<option value="${esc(m.id)}" ${m.id === r.model ? "selected" : ""}>${esc(m.group)} · ${esc(m.name)}</option>`).join("")}</select></div>
     <div class="field"><label>Schedule</label><div class="row"><div class="seg"><button class="${daily ? "on" : ""}" data-act="r-mode" data-m="daily">Daily</button><button class="${daily ? "" : "on"}" data-act="r-mode" data-m="every">Interval</button></div>
       <input class="input" id="r-at" style="width:120px;${daily ? "" : "display:none"}" value="${esc(r.at_time || "09:00")}" placeholder="09:00">
@@ -1037,7 +1109,8 @@ async function viewConnectors(el) {
   const servers = S.mcpServers, gal = (S.st.mcp_gallery || []).filter((g) => !servers.some((s) => s.id === g.id));
   el.innerHTML = `<div class="page"><div class="page-in">
     <div class="page-head"><h2>Connectors</h2><button class="btn secondary" data-act="mcp-import">${icon("download", "sm")}Import from Claude Desktop</button><button class="btn primary" data-act="mcp-add">${icon("plus", "sm")}Add custom</button></div>
-    <div class="page-sub">Connect Model Context Protocol servers to give models new tools. Most need Node.js (<code>npx</code>) or uv (<code>uvx</code>) installed.</div>
+    <div class="page-sub">Give models new abilities. Blender is built in; Model Context Protocol servers add more (most need Node.js <code>npx</code> or uv <code>uvx</code>).</div>
+    <div class="section-title">Built in</div><div id="bl-box">${blenderCardHTML(null)}</div>
     ${servers.length ? `<div class="section-title">Your connectors</div>${servers.map((s) => `<div class="card">
       <div class="card-row">${icon("plug")}<div class="grow"><h4>${esc(s.name || s.id)}</h4><div class="kv">${esc([s.command, ...(s.args || [])].join(" "))}</div></div>
         <span class="switch ${s.enabled !== false ? "on" : ""}" data-act="mcp-toggle" data-id="${esc(s.id)}"></span></div>
@@ -1047,6 +1120,7 @@ async function viewConnectors(el) {
     ${gal.length ? `<div class="section-title">Suggested</div><div class="grid2">${gal.map((g) => `<div class="card" style="margin:0"><h4>${esc(g.name)}</h4><div class="muted" style="min-height:38px">${esc(g.desc)}</div>
       <button class="btn secondary sm" style="margin-top:10px" data-act="mcp-gallery" data-id="${esc(g.id)}">${icon("plus", "sm")}Add</button></div>`).join("")}</div>` : ""}
   </div></div>`;
+  loadBlender("#bl-box");
 }
 
 /* ─────────────────────────── settings ─────────────────────────── */
@@ -1092,9 +1166,14 @@ function tabProviders(el) {
   const cloud = ps.filter((p) => !p.local && !p.custom);
   const free = cloud.filter((p) => p.free), paid = cloud.filter((p) => !p.free), local = ps.filter((p) => p.local), custom = ps.filter((p) => p.custom);
   el.innerHTML = `<div class="page-head"><h2>Providers</h2></div>
-    <div class="page-sub">Use cloud models alongside local ones. Keys stay on this computer, in your CS data folder.</div>
-    <div class="card"><h4>${icon("bolt", "sm")}Free models in about a minute</h4><div class="muted">Groq, Google Gemini and OpenRouter all offer free tiers. Click <b>Get key</b>, sign in, create a key and paste it here — every model on that account appears in the model menu.</div></div>
-    <div class="section-title">Free tiers</div>${free.map(card).join("")}
+    <div class="page-sub">Use cloud models alongside local ones. Keys stay on this computer, in your Spark X data folder.</div>
+    <div class="card"><div class="card-row"><div class="grow"><h4>${icon("bolt", "sm")}Free model <span class="badge acc">no signup</span></h4>
+      <div class="muted">Spark X picks a free public AI service that is answering right now and switches to another if it goes down. Your messages are sent to that service, so keep sensitive things for local models.</div>
+      <div id="free-status" class="free-status"></div></div>
+      <div class="row">${S.st.free_enabled ? `<span class="badge free">on</span><button class="btn ghost sm" data-act="free-disable">Turn off</button>` : `<button class="btn primary sm" data-act="free-enable">Turn on</button>`}<button class="btn ghost sm" data-act="free-check" title="Check which services answer">${icon("refresh", "sm")}</button></div></div></div>
+    <div class="section-title">Free tiers with a key</div>
+    <div class="page-sub" style="margin:-2px 0 12px">Faster and smarter than no-signup services. Click <b>Get key</b>, sign in, create a key and paste it — every model on that account appears in the model menu.</div>
+    ${free.map(card).join("")}
     <div class="section-title">On this computer</div>${local.map(card).join("")}
     <div class="section-title">Paid</div>${paid.map(card).join("")}
     ${custom.length ? `<div class="section-title">Custom</div>${custom.map(card).join("")}` : ""}
@@ -1102,27 +1181,84 @@ function tabProviders(el) {
     <div class="card"><div class="row" style="flex-wrap:wrap"><input class="input" id="c-name" style="width:150px" placeholder="Name"><input class="input" id="c-url" style="flex:1;min-width:220px" placeholder="https://host/v1">
       <input class="input" id="c-key" style="width:180px" type="password" placeholder="API key (optional)"><button class="btn primary" data-act="prov-custom">Connect</button></div>
       <div class="muted" style="margin-top:8px">vLLM, llama.cpp server, text-generation-webui, LiteLLM and most gateways work here.</div></div>`;
+  freeStatus(false);
 }
-function tabModels(el) {
-  const loc = models().filter((m) => m.local && m.kind !== "demo");
+async function freeStatus(force) {
+  const box = $("#free-status"); if (!box) return;
+  box.innerHTML = `<div class="muted" style="margin-top:8px"><span class="spin sm"></span> Checking free services…</div>`;
+  try {
+    const r = await api("/api/free" + (force ? "?force=1" : ""));
+    if (!$("#free-status")) return;
+    $("#free-status").innerHTML = (r.providers || []).map((p) => `<div class="fs-row">${p.ok ? '<span class="dot-ok"></span>' : '<span class="dot-bad"></span>'}<b>${esc(p.name)}</b>
+      <span class="muted">${p.ok ? `answering · ${p.latency_ms} ms · ${esc(p.model)}` : esc(p.error || "not answering")}</span></div>`).join("");
+  } catch (e) { box.innerHTML = `<div class="muted">${esc(e.message)}</div>`; }
+}
+const CAT_TAGS = [["all", "All"], ["general", "General"], ["coding", "Coding"], ["vision", "Sees images"], ["reasoning", "Reasoning"], ["computer", "Computer use"]];
+async function tabModels(el) {
+  if (!el) return;
+  if (!el.dataset.loaded) el.innerHTML = `<div class="page-head"><h2>Models</h2></div><div class="spin"></div>`;
+  let ol = {}, cat = { models: [], hardware: {} };
+  try { [ol, cat] = await Promise.all([api("/api/ollama"), api("/api/catalog")]); } catch (e) { el.innerHTML = `<div class="card muted">${esc(e.message)}</div>`; return; }
+  el.dataset.loaded = "1";
+  S.catFilter = S.catFilter || "all";
+  const hw = cat.hardware || {};
+  const pulling = (id) => Object.values(S.jobs).find((j) => j.kind === "ollama-pull" && j.model === id && j.status === "running");
+  const loc = models().filter((m) => m.local && m.kind !== "demo" && m.group === "Local");
   const rts = S.st.runtimes || [];
   const frozen = S.st.frozen;
   const inst = [["llamacpp-bin", "llama.cpp", "Fast GGUF inference, no Python needed"], ["llama-cpp", "llama-cpp-python", "In-process GGUF runtime"],
     ["transformers", "Transformers", "Safetensors / Hugging Face models"], ["onnx", "ONNX Runtime", "ONNX models"]];
+  const hwLine = [hw.ram_gb ? `${hw.ram_gb} GB memory` : "", hw.gpu ? `${hw.gpu}${hw.vram_gb ? ` · ${hw.vram_gb} GB` : ""}` : "no dedicated GPU found"].filter(Boolean).join(" · ");
+  const olCard = !ol.installed
+    ? `<div class="card card-row">${icon("box")}<div class="grow"><h4>Ollama isn't installed</h4><div class="muted">Ollama runs models on this computer — private and offline. Install it, then come back: Spark X starts it and keeps it running.</div></div>
+        <a class="btn primary" href="https://ollama.com/download" target="_blank" rel="noopener">Get Ollama ${icon("ext", "sm")}</a><button class="btn ghost" data-act="ol-refresh">${icon("refresh", "sm")}</button></div>`
+    : `<div class="card"><div class="card-row">${icon("box")}<div class="grow"><h4>${ol.running ? '<span class="dot-ok"></span>Ollama is running' : '<span class="dot-bad"></span>Ollama is stopped'} ${ol.version ? `<span class="muted" style="font-weight:400">· ${esc(ol.version)}</span>` : ""}</h4>
+        <div class="muted">${ol.running ? `${ol.models.length} model${ol.models.length === 1 ? "" : "s"} installed${ol.revived ? ` · brought back ${ol.revived}× after it stopped` : ""}` : esc(ol.error || "Spark X starts it for you — or start it now.")}</div></div>
+        ${ol.running ? "" : `<button class="btn primary" data-act="ol-start">Start Ollama</button>`}</div>
+        <div class="card-row" style="margin-top:12px"><div class="grow"><b style="font-weight:500">Keep Ollama running</b><div class="muted">Start it with Spark X and revive it if it crashes.</div></div><span class="switch ${ol.keep_alive ? "on" : ""}" data-act="toggle-pref" data-k="ollama_keep_alive"></span></div>
+        ${ol.models.length ? `<div class="ol-list">${ol.models.map((m) => `<div class="ol-row"><div class="grow"><b>${esc(m.name)}</b> <span class="muted">${esc([m.params, m.quant, m.size_h].filter(Boolean).join(" · "))}</span>
+          ${(m.caps || []).filter((c) => ["vision", "tools", "thinking"].includes(c)).map((c) => `<span class="badge">${c}</span>`).join("")}</div>
+          <button class="btn ghost sm" data-act="ol-use" data-id="ollama/${esc(m.name)}">Use</button><button class="btn ghost sm" data-act="ol-del" data-m="${esc(m.name)}" title="Delete">${icon("trash", "sm")}</button></div>`).join("")}</div>` : ""}
+        <div class="row" style="margin-top:12px"><input class="input mono" id="ol-name" style="flex:1" placeholder="Any Ollama model, e.g. qwen3:8b — or hf.co/owner/repo"><button class="btn secondary" data-act="ol-pull-name">${icon("download", "sm")}Download</button></div></div>`;
+  const shown = (cat.models || []).filter((m) => S.catFilter === "all" || (m.tags || []).includes(S.catFilter));
+  shown.sort((a, b) => (b.fits - a.fits) || ((b.best_for || []).length - (a.best_for || []).length) || (b.score - a.score));
+  const mcard = (m) => {
+    const j = pulling(m.id);
+    const btn = m.installed ? `<button class="btn ghost sm" data-act="ol-use" data-id="ollama/${esc(m.id)}">${icon("check", "sm")}Installed · use</button>`
+      : j ? `<div class="bar"><i style="width:${Math.round((j.progress || 0) * 100)}%"></i></div>`
+      : `<button class="btn ${m.fits ? "secondary" : "ghost"} sm" data-act="ol-pull" data-m="${esc(m.id)}" ${ol.installed ? "" : "disabled title='Install Ollama first'"}>${icon("download", "sm")}Get · ${m.size_gb} GB</button>`;
+    return `<div class="card mcard ${m.fits ? "" : "dim"}"><div class="mc-head"><h4>${esc(m.name)}</h4><span class="muted">${esc(m.by || "")}</span></div>
+      <div class="mc-badges">${(m.best_for || []).map((t) => `<span class="badge acc">Best for ${t === "computer" ? "computer use" : t}</span>`).join("")}${m.fits ? (m.fast ? '<span class="badge free">runs fast here</span>' : "") : `<span class="badge warn">needs ${m.min_ram} GB</span>`}${(m.tags || []).filter((t) => ["vision", "tools"].includes(t)).map((t) => `<span class="badge">${t}</span>`).join("")}</div>
+      <div class="muted mc-blurb">${esc(m.blurb || "")}</div><div class="mc-foot"><code>${esc(m.id)}</code>${btn}</div></div>`;
+  };
   el.innerHTML = `<div class="page-head"><h2>Models</h2><button class="btn secondary" data-act="rescan">${icon("refresh", "sm")}Rescan</button></div>
-    <div class="section-title">On this computer</div>
-    ${loc.length ? loc.map((m) => `<div class="card card-row" style="padding:12px 16px">${icon("box")}<div class="grow"><h4>${esc(m.name)}</h4><div class="muted">${esc([m.size, m.arch, m.kind].filter(Boolean).join(" · "))}</div></div>
-      ${m.ready ? `<span class="badge free">${esc(m.runtime)}</span>` : '<span class="badge warn">needs a runtime</span>'}</div>`).join("")
-      : `<div class="card muted">No local models found yet. Download one below, drop <code>.gguf</code> files into your CS data <code>models</code> folder, or use the one-click coder in Code.</div>`}
-    <div class="section-title">Download from Hugging Face</div>
+    <div class="section-title">Local AI</div>${olCard}
+    <div class="section-title">Suggested for this computer <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:400">— ${esc(hwLine)}</span></div>
+    <div class="seg" style="margin-bottom:12px">${CAT_TAGS.map(([k, l]) => `<button class="${S.catFilter === k ? "on" : ""}" data-act="cat-filter" data-k="${k}">${l}</button>`).join("")}</div>
+    <div class="grid2">${shown.map(mcard).join("")}</div>
+    <div class="section-title">Trending on Hugging Face</div>
+    <div class="card" id="trending"><div class="card-row"><div class="grow muted">The newest popular GGUF models, live. Each one can be pulled into Ollama.</div><button class="btn secondary sm" data-act="trending">Show</button></div></div>
+    ${loc.length ? `<div class="section-title">Model files on this computer</div>${loc.map((m) => `<div class="card card-row" style="padding:12px 16px">${icon("box")}<div class="grow"><h4>${esc(m.name)}</h4><div class="muted">${esc([m.size, m.arch, m.kind].filter(Boolean).join(" · "))}</div></div>
+      ${m.ready ? `<span class="badge free">${esc(m.runtime)}</span>` : '<span class="badge warn">needs a runtime</span>'}</div>`).join("")}` : ""}
+    <div class="section-title">Download GGUF files from Hugging Face</div>
     <div class="card"><div class="row" style="flex-wrap:wrap"><input class="input mono" id="hf-repo" style="flex:1;min-width:240px" placeholder="owner/repo  e.g. bartowski/Qwen2.5-7B-Instruct-GGUF">
       <input class="input mono" id="hf-only" style="width:190px" placeholder="*Q4_K_M.gguf"><button class="btn primary" data-act="hf-pull">${icon("download", "sm")}Download</button></div>
-      <div class="muted" style="margin-top:8px">Tip: for GGUF repos, pick one quantization with a pattern like <code>*Q4_K_M.gguf</code>.</div></div>
+      <div class="muted" style="margin-top:8px">Runs with llama.cpp instead of Ollama. For GGUF repos, pick one quantization with a pattern like <code>*Q4_K_M.gguf</code>.</div></div>
     <div class="section-title">Runtimes</div>
     <div class="card">${rts.map((r) => `<div class="card-row" style="padding:6px 0">${r.ok ? '<span class="dot-ok"></span>' : '<span class="dot-bad"></span>'}<div class="grow"><b style="font-weight:500">${esc(r.id)}</b> <span class="muted">${esc(r.ok ? "ready" : r.detail)}</span></div></div>`).join("")}</div>
     <div class="grid2" style="margin-top:12px">${inst.map(([t, n, d]) => `<div class="card" style="margin:0"><h4>${esc(n)}</h4><div class="muted" style="min-height:38px">${esc(d)}${frozen && t !== "llamacpp-bin" ? " · needs Python installed" : ""}</div>
       <button class="btn secondary sm" style="margin-top:10px" data-act="install" data-t="${t}">${icon("download", "sm")}Install</button></div>`).join("")}</div>
     <div id="jobs-box" data-filter="">${jobsFor("")}</div>`;
+}
+async function showTrending() {
+  const box = $("#trending"); if (!box) return;
+  box.innerHTML = `<div class="spin"></div>`;
+  try {
+    const r = await api("/api/catalog/trending");
+    if (!r.models.length) { box.innerHTML = `<div class="muted">${esc(r.error || "Nothing to show right now.")}</div>`; return; }
+    box.innerHTML = r.models.map((m) => `<div class="ol-row"><div class="grow"><b>${esc(m.id)}</b> <span class="muted">${m.likes} likes · ${m.downloads.toLocaleString()} downloads${m.created ? " · " + esc(m.created) : ""}</span>${m.vision ? ' <span class="badge">vision</span>' : ""}</div>
+      <button class="btn ghost sm" data-act="ol-pull" data-m="${esc(m.pull)}">${icon("download", "sm")}Get</button></div>`).join("");
+  } catch (e) { box.innerHTML = `<div class="muted">${esc(e.message)}</div>`; }
 }
 async function tabContext(el) {
   const ms = models().filter((m) => m.kind !== "demo");
@@ -1142,23 +1278,46 @@ async function tabContext(el) {
       <button class="btn primary" data-act="save-ctx">Save</button>`;
   } catch (e) { $("#ctx-f").innerHTML = `<div class="muted">${esc(e.message)}</div>`; }
 }
+function blenderCardHTML(b) {
+  if (!b) return `<div class="card"><div class="spin"></div></div>`;
+  if (!b.found) return `<div class="card card-row">${icon("box")}<div class="grow"><h4>Blender</h4><div class="muted">Not found. Install it from blender.org (Spark X finds it automatically), or point to it below.</div>
+      <div class="row" style="margin-top:10px"><input class="input mono" id="bl-path" style="flex:1" placeholder="Path to blender(.exe)"><button class="btn secondary sm" data-act="bl-path">Save</button></div></div>
+      <a class="btn primary" href="https://www.blender.org/download/" target="_blank" rel="noopener">Get Blender ${icon("ext", "sm")}</a></div>`;
+  return `<div class="card"><div class="card-row">${icon("box")}<div class="grow"><h4><span class="dot-ok"></span>Blender ${esc(b.version || "")}</h4><div class="kv">${esc(b.path)}</div></div>
+      <button class="btn secondary sm" data-act="bl-open">Open Blender</button></div>
+    <div class="card-row" style="margin-top:12px"><div class="grow"><b style="font-weight:500">Live bridge</b> ${b.bridge.connected ? '<span class="badge free">connected</span>' : '<span class="badge">not connected</span>'}
+      <div class="muted">${b.bridge.connected ? "Models can build directly in the Blender window you have open." : "Install the bridge add-on so models can build in the Blender window you have open (not just in the background)."}</div></div>
+      <button class="btn ${b.bridge.connected ? "ghost" : "primary"} sm" data-act="bl-install">${b.bridge.connected ? "Reinstall" : "Install bridge"}</button></div>
+    <div class="muted" style="margin-top:10px">Turn on <b>Blender</b> in a chat's tools menu, then ask for a scene — “a low-poly island with a lighthouse, rendered at sunset”.</div></div>`;
+}
+async function loadBlender(target) {
+  try { const b = await api("/api/blender"); const box = $(target); if (box) box.innerHTML = blenderCardHTML(b); } catch (e) {}
+}
 function tabComputer(el) {
-  const c = S.st.computer || {};
+  const c = S.st.computer || {}, p = S.st.prefs || {};
+  const w = +(p.computer_shot_width || 1280);
   el.innerHTML = `<div class="page-head"><h2>Computer use</h2></div>
-    <div class="page-sub">Let a model see your screen and use the mouse and keyboard to get things done. Every action asks for your approval unless you allow all tools.</div>
+    <div class="page-sub">Let a model use this computer like a person: it sees the screen, moves the mouse, types, opens apps and runs commands. Each action asks for your approval unless you choose “Always allow”.</div>
     <div class="card"><div class="card-row"><div class="grow"><h4>${c.available ? '<span class="dot-ok"></span>Ready' : '<span class="dot-bad"></span>Not set up'}</h4>
       <div class="muted">${c.available ? "Turn on Computer use from the tools menu in any chat." : c.frozen ? "This build doesn't include the screen-control libraries." : `Missing: ${esc((c.missing || []).join(", "))}`}</div></div>
       ${!c.available && !c.frozen ? `<button class="btn primary" data-act="install" data-t="computer">${icon("download", "sm")}Install support</button>` : ""}</div></div>
-    <div class="card"><h4>${icon("camera", "sm")}Screenshots</h4><div class="muted">Vision-capable cloud models (Gemini, GPT-4o/4.1, Llama 4, Pixtral…) receive screenshots directly; other models get the file path${c.ocr ? " and OCR text" : ""}.</div>
-      ${c.available ? `<button class="btn secondary sm" style="margin-top:10px" data-act="test-shot">Take a test screenshot</button><div id="shot-out"></div>` : ""}</div>
+    <div class="card"><h4>${icon("bulb", "sm")}How it works</h4><div class="muted">The model gets a screenshot, decides on one action (click, type, a shortcut…), then gets a fresh screenshot to check the result — until the task is done. Use a model that can see images: Gemini, GPT-4.1, Mistral Small 3.2 or Qwen2.5-VL (local). To stop instantly, press Stop or slam the mouse into a screen corner.</div></div>
+    <div class="section-title">Options</div>
+    <div class="card"><div class="card-row"><div class="grow"><b style="font-weight:500">Get out of the way while working</b><div class="muted">Minimize Spark X once you've allowed the model to act, and bring it back when it's done.</div></div>
+      <span class="switch ${p.computer_minimize !== false ? "on" : ""}" data-act="toggle-pref" data-k="computer_minimize"></span></div>
+      <div class="card-row" style="margin-top:14px"><div class="grow"><b style="font-weight:500">Screenshot size</b><div class="muted">Smaller is faster and cheaper; larger shows more detail.</div></div>
+      <div class="seg">${[1024, 1280, 1600].map((v) => `<button class="${w === v ? "on" : ""}" data-act="set-pref-val" data-k="computer_shot_width" data-v="${v}">${v}px</button>`).join("")}</div></div>
+      ${c.available ? `<button class="btn secondary sm" style="margin-top:14px" data-act="test-shot">Take a test screenshot</button><div id="shot-out"></div>` : ""}</div>
+    <div class="section-title">Apps</div><div id="bl-box">${blenderCardHTML(null)}</div>
     <div id="jobs-box" data-filter="computer">${jobsFor("computer")}</div>`;
+  loadBlender("#bl-box");
 }
 function tabAbout(el) {
   el.innerHTML = `<div class="page-head"><h2>About</h2></div>
     <div class="card" style="display:flex;gap:22px;align-items:center"><img src="/static/icon.png" width="96" height="96" alt="">
-      <div><h4 style="font-family:var(--serif);font-weight:400;font-size:24px">CS Framework</h4>
+      <div><h4 style="font-family:var(--serif);font-weight:400;font-size:24px">Spark X</h4>
       <div class="muted">Version ${esc(S.st.version)} · ${esc(S.st.codename)}${S.st.frozen ? " · packaged app" : ""}</div>
-      <div class="muted" style="margin-top:6px">Local models, free cloud providers, artifacts, code, browser, connectors and routines — in one app that runs on your machine.</div>
+      <div class="muted" style="margin-top:6px">Local and free models, computer use, Blender, artifacts, code, browser, connectors and routines — in one app that runs on your machine. Built on CS Framework.</div>
       <div class="row" style="margin-top:12px"><a class="btn secondary sm" href="https://github.com/qulyttvv-beep/cs-framework-v4" target="_blank" rel="noopener">GitHub ${icon("ext", "sm")}</a></div></div></div>
     <div class="section-title">Keyboard</div>
     <div class="card">${[["New chat", "Ctrl/⌘ Shift O"], ["Toggle sidebar", "Ctrl/⌘ B"], ["Settings", "Ctrl/⌘ ,"], ["Send", "Enter"], ["New line", "Shift Enter"], ["Close panel", "Esc"]]
@@ -1356,6 +1515,32 @@ const ACT = {
   "set-accent": (el) => { document.documentElement.style.setProperty("--accent", el.dataset.c); LS.set("accent_raw", el.dataset.c); try { localStorage.setItem("cs.accent", el.dataset.c); } catch (e) {} viewSettings($("#view-settings")); renderSide(); },
   "set-font": (el) => { LS.set("font", el.dataset.f); applyFont(); viewSettings($("#view-settings")); },
   "set-approval": async (el) => { await savePrefs({ tool_approval: el.dataset.v }); viewSettings($("#view-settings")); },
+  "free-enable": async (el) => {
+    const was = el.innerHTML; el.disabled = true; el.innerHTML = `<span class="spin sm"></span> Finding a free service…`;
+    try {
+      const r = await api("/api/free/enable", { method: "POST", body: {} });
+      await refreshState();
+      const ok = (r.providers || []).find((p) => p.ok);
+      if (ok) { setModel("free/auto"); toast(`Free model ready — using ${ok.name}`); }
+      else toast("No free service is answering right now. Try again soon, or use Ollama / a free key.", true);
+      closePop(); renderView();
+    } catch (e) { toast(e.message, true); el.disabled = false; el.innerHTML = was; }
+  },
+  "free-disable": async () => { await api("/api/free/disable", { method: "POST", body: {} }); await refreshState(); renderView(); },
+  "free-check": () => freeStatus(true),
+  "ol-refresh": () => tabModels($("#stab")),
+  "ol-start": async (el) => { el.disabled = true; el.textContent = "Starting…"; try { await api("/api/ollama/start", { method: "POST", body: {} }); toast("Ollama is running"); } catch (e) { toast(e.message, true); } await refreshState(); tabModels($("#stab")); },
+  "ol-pull": (el) => { startJob("/api/ollama/pull", { model: el.dataset.m }); },
+  "ol-pull-name": () => { const v = ($("#ol-name").value || "").trim(); if (v) startJob("/api/ollama/pull", { model: v }); },
+  "ol-del": async (el) => { if (!confirm(`Delete ${el.dataset.m} from Ollama?`)) return; try { await api("/api/ollama/delete", { method: "POST", body: { model: el.dataset.m } }); toast("Deleted"); } catch (e) { toast(e.message, true); } await refreshState(); tabModels($("#stab")); },
+  "ol-use": (el) => { setModel(el.dataset.id); toast("Model selected"); go("chat"); },
+  "cat-filter": (el) => { S.catFilter = el.dataset.k; tabModels($("#stab")); },
+  "trending": () => showTrending(),
+  "job-cancel": async (el) => { await api("/api/jobs/cancel", { method: "POST", body: { id: el.dataset.id } }).catch(() => {}); },
+  "bl-install": async (el) => { el.disabled = true; el.textContent = "Installing…"; try { const r = await api("/api/blender/install_bridge", { method: "POST", body: {} }); toast(r.message); } catch (e) { toast(e.message, true); } loadBlender("#bl-box"); },
+  "bl-open": async () => { try { await api("/api/blender/open", { method: "POST", body: {} }); toast("Opening Blender…"); setTimeout(() => loadBlender("#bl-box"), 6000); } catch (e) { toast(e.message, true); } },
+  "bl-path": async () => { await savePrefs({ blender_path: ($("#bl-path").value || "").trim() }); await refreshState(); loadBlender("#bl-box"); },
+  "set-pref-val": async (el) => { const v = el.dataset.v; await savePrefs({ [el.dataset.k]: isNaN(+v) ? v : +v }); el.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b === el)); },
   "toggle-pref": async (el) => { const k = el.dataset.k, cur = (S.st.prefs || {})[k] !== false; await savePrefs({ [k]: !cur }); el.classList.toggle("on", !cur); },
   "prov-connect": async (el) => {
     const id = el.dataset.id, inp = $("#k-" + CSS.escape(id));
@@ -1430,7 +1615,7 @@ async function boot() {
   applyFont();
   if (LS.get("side", false)) $("#app").classList.add("side-hidden");
   try { S.st = await api("/api/state"); }
-  catch (e) { $("#splash").innerHTML = `<div style="text-align:center;color:var(--text-2)">Couldn't reach CS Framework.<br><small>${esc(e.message)}</small></div>`; return; }
+  catch (e) { $("#splash").innerHTML = `<div style="text-align:center;color:var(--text-2)">Couldn't reach Spark X.<br><small>${esc(e.message)}</small></div>`; return; }
   S.model = pickDefaultModel();
   if (!S.tools.chat) S.tools.chat = { code: false, web: false, computer: false, mcp: [] };
   if (!S.tools.code) S.tools.code = { code: true, web: false, computer: false, mcp: [] };
@@ -1438,5 +1623,6 @@ async function boot() {
   await route();
   const wait = Math.max(0, 700 - (performance.now() - t0));
   setTimeout(() => $("#splash").classList.add("gone"), wait);
+  window.__spark = { ready: true, models: models().length, version: S.st.version };   // for the packaged-app smoke test
 }
 boot();

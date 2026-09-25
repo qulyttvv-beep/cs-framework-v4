@@ -1,73 +1,235 @@
 <p align="center">
-  <img src="assets/icon-256.png" width="160" alt="CS Framework">
+  <img src="assets/icon-256.png" width="160" alt="Spark X">
 </p>
 
-<h1 align="center">CS Framework</h1>
+<h1 align="center">Spark X</h1>
 
 <p align="center">
-  A single-file portable LLM runner, model manager, coding-agent hub —<br>
-  and <b>CS Studio</b>, a desktop app for all of it.
+  A desktop AI app that can really use your computer.<br>
+  Chat, write code, run models locally, control the mouse and keyboard, and build 3D scenes in Blender.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/platform-windows%20%7C%20linux%20%7C%20macos-lightgrey.svg" alt="Platforms">
-  <img src="https://img.shields.io/badge/version-4.2.0-brightgreen.svg" alt="Version 4.2.0">
+  <img src="https://img.shields.io/badge/version-4.3.0-brightgreen.svg" alt="Version 4.3.0">
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/home.png" width="860" alt="CS Studio">
+  <img src="docs/screenshots/home.png" width="860" alt="Spark X">
 </p>
 
 ---
 
-## What it is
+## Download
 
-One executable (or one `cs.py`). Double-click it and **CS Studio** opens; run
-it from a terminal and you get the full CLI. Either way it is a complete
-local-LLM workbench:
+| | |
+|---|---|
+| **Windows** 10 / 11 | [**SparkX-Setup-x64.exe**](https://github.com/qulyttvv-beep/cs-framework-v4/releases/latest/download/SparkX-Setup-x64.exe): installs for your user (no admin prompt) and adds Spark X to the Start menu |
+| **macOS** (Apple silicon) | [**SparkX-macOS-arm64.dmg**](https://github.com/qulyttvv-beep/cs-framework-v4/releases/latest/download/SparkX-macOS-arm64.dmg): open it and drag Spark X into Applications |
+| **Linux** | [cs-linux-x86_64](https://github.com/qulyttvv-beep/cs-framework-v4/releases/latest/download/cs-linux-x86_64): `chmod +x cs-linux-x86_64 && ./cs-linux-x86_64 studio` |
 
-- **CS Studio** — a calm, dark desktop app in the style of the Claude desktop
-  app: chat with **artifacts**, a **Code** workspace with an agent that edits
-  your project, a built-in **browser**, **computer use**, **MCP connectors**
-  (imports your Claude Desktop config), scheduled **routines**, and every
-  model — local or cloud — in one picker. [More below](#cs-studio).
-- **Free cloud models** — Groq, Google Gemini, OpenRouter, Cerebras, Mistral,
-  GitHub Models, Hugging Face, NVIDIA NIM and SambaNova all have free tiers:
-  paste a key and every model on that account shows up. Ollama and LM Studio
-  are detected automatically.
-- **Local coder in one click** — download a Qwen2.5-Coder GGUF plus
-  llama.cpp and it's ready to use offline, in the app or in `cs code`.
-- **Model scanning** — finds every `.gguf`, `.safetensors`, `.bin`, and
-  `.onnx` across the Hugging Face cache, LM Studio, Ollama, and your own
-  folders.
-- **Runtime routing** — picks the right engine per model: llama.cpp
-  (Python / CLI / server), transformers, Optimum/ONNX, vLLM, MLX,
-  Ollama, any OpenAI-compatible endpoint, or a user plugin.
-- **Chat, code, serve, bench** — talk to a model, run it in a
-  ReAct-style coding loop with `bash`/`read`/`write`/`grep` tools,
-  expose it as an OpenAI-compatible API, or measure tok/s.
-- **Coding-agent connectors** — wire Claude Code, Codex, OpenCode,
-  Aider, Goose, Open Interpreter, and Crush straight at a local model
-  server with one command.
-- **Custom-architecture support** — non-standard arch strings like
-  `qwen35`, `bonsai`, `BonsaiForCausalLM` map to real transformer
-  classes with a fallback chain.
-- **Ternary kernel support** — Bonsai 2's `PQ2_0` / `PTQ1_0` tensor
-  types route through the PrismML fork of llama.cpp automatically.
-- **Incognito mode** — chat without writing anything to disk.
-- **Portable data** — copy the folder to a USB stick or another laptop
-  and everything comes with it.
+The installers aren't code-signed yet. On Windows, if SmartScreen stops the
+installer, click **More info → Run anyway**. On macOS, the first time you open
+the app, go to **System Settings → Privacy & Security** and click **Open
+Anyway**, or run `xattr -dr com.apple.quarantine "/Applications/Spark X.app"`.
+Checksums for every file are in `SHA256SUMS.txt` on the
+[release page](https://github.com/qulyttvv-beep/cs-framework-v4/releases/latest).
+
+Spark X is a real app with its own window (WebView2 on Windows, WebKit on
+macOS), not a browser tab. Your settings, chats and models are kept in your user
+profile (`%APPDATA%\Spark X`, `~/Library/Application Support/Spark X`), so they
+survive updates.
 
 ---
 
-## Install
+## What it does
 
-### Download a prebuilt binary (no Python needed)
+- **Works the moment it opens.** Click **Free model** and Spark X finds a free
+  public AI service that is answering right now (no account, no key) and switches
+  to another if one goes down. The app says plainly that those messages go to that
+  service; for private chats use a local model.
+- **Runs models on your computer.** Spark X starts **Ollama** for you, keeps it
+  running and restarts it if it stops. The **Models** page suggests current open
+  models that fit your machine's memory, shows what's trending on Hugging Face,
+  and downloads any of them with one click.
+- **Uses your computer.** With **Computer use** on, the model sees your screen and
+  moves the mouse, clicks, types, presses shortcuts, scrolls and opens apps,
+  files and websites. It checks a fresh screenshot after every step, and each
+  action asks for your permission first.
+- **Makes things in Blender.** It writes Blender Python, runs it, and shows you
+  the render right in the chat, saving the `.blend` alongside. With the Spark X
+  bridge add-on it builds in the Blender you have open.
+- **Everything else you'd expect:** chat with **artifacts** (live HTML / SVG /
+  code previews), a **Code** workspace with an agent that edits your project,
+  a built-in **browser**, **MCP connectors** (imports your Claude Desktop config),
+  scheduled **routines**, and every model (free, local or cloud) in one picker.
 
-Grab the single-file executable for your platform from the
-[latest release](https://github.com/qulyttvv-beep/cs-framework-v4/releases/latest):
+<table>
+  <tr>
+    <td><img src="docs/screenshots/computer.png" alt="Computer use asks before each action"></td>
+    <td><img src="docs/screenshots/blender.png" alt="A scene built and rendered in Blender"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/models.png" alt="Ollama and suggested models"></td>
+    <td><img src="docs/screenshots/free-chat.png" alt="A free model, no account needed"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/artifact.png" alt="Artifacts"></td>
+    <td><img src="docs/screenshots/code.png" alt="Code workspace"></td>
+  </tr>
+</table>
+
+Underneath is **`cs`**, a single-file local-LLM runner and agent hub (the
+[framework](#the-cs-framework) below): model scanning, llama.cpp /
+transformers / ONNX routing, an OpenAI-compatible server and coding-agent
+connectors. The Windows installer includes it as the `cs` command; everywhere
+else it's the single-file `cs` download.
+
+---
+
+## Using Spark X
+
+### Pick a model
+
+The model picker lists everything you can use:
+
+| Where | How |
+|---|---|
+| **Free model** | One click, no signup. Spark X checks which keyless public services ([Pollinations](https://pollinations.ai), [LLM7](https://llm7.io)) are answering and uses the first that works, falling back to the next if it fails. The reply shows which service answered. Turn it off under *Settings → Providers*. |
+| **On this machine** | Ollama models (download them on the *Models* page) and LM Studio, found automatically when they're running. Private and offline. |
+| **Local files** | Every GGUF / safetensors / ONNX model `cs scan` finds, run with llama.cpp, transformers, … |
+| **Free API tiers** | **Groq, Google Gemini, OpenRouter, Cerebras, Mistral, GitHub Models, Hugging Face, NVIDIA NIM, SambaNova**. In *Settings → Providers*, click **Get key**, sign in, paste the key; every model on the account shows up. |
+| **Paid APIs** | OpenAI, DeepSeek, Together AI |
+| **Anything else** | **Custom endpoint**: any OpenAI-compatible URL (vLLM, llama-server, LiteLLM, a company gateway …), with or without a key |
+
+Keys are stored only on your computer and are never sent back to the window.
+Spark X doesn't scrape websites or create accounts to get "free tokens": the free
+option only uses services that are open to everyone by design, and every
+provider above offers its free tier officially.
+
+### Local models with Ollama
+
+*Settings → Models* shows whether Ollama is installed and running (with a
+**Get Ollama** button if it isn't). Spark X starts it when the app opens and,
+with **Keep Ollama running** on, restarts it if it crashes or is closed.
+
+**Suggested for this computer** is a hand-picked list of current open models
+(gpt-oss, Qwen3, Gemma 3, Mistral Small, DeepSeek-R1, Magistral, Qwen3-Coder,
+Devstral, Qwen2.5-VL, Phi-4 mini, Llama …). Each card shows its size, what it's
+best at (general, coding, seeing images, reasoning, computer use) and whether it
+fits your RAM / VRAM. **Trending on Hugging Face** lists popular GGUF models from
+the last weeks. You can also type any Ollama model name or `hf.co/owner/repo`.
+Downloads show progress and can be cancelled.
+
+### Computer use
+
+Turn on **Computer** in the tools menu (the sliders button in the message box)
+and ask for something: *"Open Spotify and play my liked songs"*, *"Rename the
+screenshots on my desktop by date"*. The model looks at the screen, then clicks,
+double-clicks, drags, scrolls, types and presses keys (`ctrl+s`, `cmd+space` …),
+and checks a new screenshot after each step. Before each action Spark X asks
+**Allow once / Always allow / Deny**. If you choose *Always allow*, the Spark X
+window gets out of the way while it works. To stop it at any time, push the
+mouse into any corner of the screen.
+
+Models that can see images (Gemma 3, Qwen2.5-VL, most cloud models) get the
+screenshots. Other models are told they can't see the screen, so they stick to
+keyboard shortcuts, `open` and terminal commands.
+
+- **macOS:** allow Spark X under *System Settings → Privacy & Security* →
+  **Accessibility** and **Screen Recording** the first time.
+- **Linux:** works on X11. Under Wayland, screenshots and input depend on the
+  compositor.
+- From source, run `cs install computer` to add the libraries (the downloads
+  already include them).
+
+### Blender
+
+Turn on **Blender** in the tools menu and ask: *"Model a low-poly island with a
+lighthouse and render it"*. Spark X finds Blender (the standard install
+locations, Steam, `PATH`, or the path you set in *Settings → Computer use*),
+runs the model's script in the background, renders, and puts the picture in the
+chat. The `.blend` file is saved with it. If rendering on the GPU isn't
+possible, it renders with Cycles on the CPU instead.
+
+To have it work in the Blender you have open, click **Install bridge** under
+*Connectors → Blender*. The bridge is a small add-on that only listens on
+`127.0.0.1` and only accepts requests carrying a random key that Spark X reads
+from your user folder.
+
+### Code, browser, connectors, routines
+
+**Code workspace.** Open a project folder: file tree, viewer, editor, and an
+agent that reads, greps, edits files and runs commands in that folder. Each
+change it wants to make asks for your approval first. No model? **Download &
+set up** fetches Qwen2.5-Coder (1.5B / 7B / 14B GGUF) and llama.cpp, and after
+that it works fully offline.
+
+**Built-in browser.** Search the web or open any address inside the app.
+**Reader** mode turns a page into clean text, and **Ask Spark X about this
+page** sends it into a chat. The model can use the same browser as a tool.
+
+**Connectors (MCP).** Add Model Context Protocol servers from a gallery
+(filesystem, memory, fetch, git, time, sequential-thinking) or by command, or
+**import your Claude Desktop config** in one click. Their tools show up next to
+the built-in ones.
+
+**Routines.** Schedule prompts to run every N minutes or daily at a set time,
+with any model and tools, and a run log.
+
+**Settings.** Theme and accent, per-model context (system prompt, sampling,
+GPU layers, context length), runtime status and installs, Hugging Face
+downloads, and provider connections.
+
+**Try it with nothing installed.** The built-in **Spark Echo** demo model lets
+you explore the app (including artifacts) before you connect anything.
+
+**Security.** The app only listens on `127.0.0.1`. Each launch creates a random
+session token, and every API call must carry it. Requests from other origins
+or with a foreign `Host` header (DNS rebinding) are rejected. Artifacts and
+browsed pages render in sandboxed frames that cannot reach the API. File access
+is limited to the project folder you opened, and anything that changes
+something (commands, file edits, mouse and keyboard, Blender scripts) asks
+first unless you've said *Always allow*.
+
+---
+
+## The cs framework
+
+Everything above runs on `cs`, a single-file portable model runner, model
+manager and coding-agent hub. You can use it on its own from a terminal:
+
+- **Model scanning**: finds every `.gguf`, `.safetensors`, `.bin`, and
+  `.onnx` across the Hugging Face cache, LM Studio, Ollama, and your own
+  folders.
+- **Runtime routing**: picks the right engine per model: llama.cpp
+  (Python / CLI / server), transformers, Optimum/ONNX, vLLM, MLX,
+  Ollama, any OpenAI-compatible endpoint, or a user plugin.
+- **Chat, code, serve, bench**: talk to a model, run it in a
+  ReAct-style coding loop with `bash`/`read`/`write`/`grep` tools,
+  expose it as an OpenAI-compatible API, or measure tok/s.
+- **Coding-agent connectors**: wire Claude Code, Codex, OpenCode,
+  Aider, Goose, Open Interpreter, and Crush straight at a local model
+  server with one command.
+- **Custom-architecture support**: non-standard arch strings like
+  `qwen35`, `bonsai`, `BonsaiForCausalLM` map to real transformer
+  classes with a fallback chain.
+- **Ternary kernel support**: Bonsai 2's `PQ2_0` / `PTQ1_0` tensor
+  types route through the PrismML fork of llama.cpp automatically.
+- **Incognito mode**: chat without writing anything to disk.
+- **Portable data**: copy the folder to a USB stick or another laptop
+  and everything comes with it.
+
+## Install `cs`
+
+### Single-file binaries (no Python needed)
+
+The [latest release](https://github.com/qulyttvv-beep/cs-framework-v4/releases/latest)
+also has the `cs` tool as one file per platform. It contains the whole app
+too: `cs studio` opens Spark X in an app window of Edge / Chrome, or your
+browser.
 
 | Platform | Asset |
 |---|---|
@@ -75,33 +237,27 @@ Grab the single-file executable for your platform from the
 | Linux x64 | `cs-linux-x86_64` |
 | macOS (Apple Silicon) | `cs-macos-arm64` |
 
-**Windows:** double-click `cs-windows-x86_64.exe` — CS Studio opens in its own
-window (the console hides itself). Run it from a terminal instead and you get
-the CLI; `cs studio` opens the app from there too.
-
 ```bash
 # macOS / Linux
 chmod +x cs-linux-x86_64
-./cs-linux-x86_64 studio          # open CS Studio
+./cs-linux-x86_64 studio          # open Spark X
 ./cs-linux-x86_64                 # interactive CLI
 ./cs-linux-x86_64 install-self    # optional: add `cs` to your PATH
 ```
 
-Verify your download against `SHA256SUMS.txt` published with the release. The
-binaries are not code-signed, so Windows SmartScreen / macOS Gatekeeper may ask
-you to confirm the first launch (macOS: right-click → Open).
+On Windows, double-clicking `cs-windows-x86_64.exe` opens Spark X too (the
+console hides itself). The single-file binary keeps its data in a `cs_data/`
+folder **next to itself**, so you can carry the pair on a USB stick.
 
-The binary stores everything in a `cs_data/` folder **next to the executable**,
-so copy the pair to a USB stick or another machine and it all travels together.
-
-### Install with pipx (Python users)
+### With pip / pipx (Python users)
 
 ```bash
-pipx install git+https://github.com/qulyttvv-beep/cs-framework-v4
-cs
+pipx install "cs-framework[studio] @ git+https://github.com/qulyttvv-beep/cs-framework-v4"
+spark-x      # the app, in its own window
+cs           # the CLI
 ```
 
-(or `pip install git+https://github.com/qulyttvv-beep/cs-framework-v4`)
+(`[studio]` adds pywebview for the native window; leave it out for the CLI only.)
 
 ### Windows (from source)
 
@@ -139,7 +295,7 @@ cs
 
 ```
 cs                                     # interactive model chooser
-cs studio                              # ⭐ CS Studio desktop app
+cs studio                              # ⭐ the Spark X app
 cs chat  <model>                       # chat
 cs code  <model>                       # tool-augmented coding
 cs run   <model> -p "explain X"        # one-shot prompt
@@ -154,96 +310,11 @@ cs agents install claude-code
 cs agents launch  claude-code --model <model>
 ```
 
----
-
-## CS Studio
-
 ```
 cs studio                 # open the app
 cs studio --no-open       # just run it; open http://127.0.0.1:8799 yourself
 cs studio --port 9000 --model "groq/llama-3.3-70b-versatile"
 ```
-
-CS Studio is a desktop app modelled on the Claude desktop app: a quiet dark
-interface (with a light theme), serif replies, no clutter. It runs entirely on
-your machine, inside the same single executable as the CLI. It opens in its own
-chromeless window: a native one if `pywebview` is installed, otherwise an
-app-mode Edge / Chrome / Chromium window, otherwise your default browser.
-
-<table>
-  <tr>
-    <td><img src="docs/screenshots/artifact.png" alt="Artifacts"></td>
-    <td><img src="docs/screenshots/code.png" alt="Code workspace"></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/tools.png" alt="Tool approval"></td>
-    <td><img src="docs/screenshots/browser.png" alt="Built-in browser"></td>
-  </tr>
-</table>
-
-**Chat & artifacts.** Streaming replies with markdown, tables and syntax
-highlighting; attach files and images (vision models get the image). HTML, SVG
-and longer code blocks become **artifacts** that open beside the chat with live
-**Preview** / **Code** tabs, copy and download. Every artifact is also collected
-in the **Artifacts** gallery.
-
-**Models from everywhere, in one picker.**
-
-| Where | How |
-|---|---|
-| Local files | Every GGUF / safetensors / ONNX model `cs scan` finds, run with llama.cpp, transformers, … |
-| Free cloud tiers | **Groq, Google Gemini, OpenRouter, Cerebras, Mistral, GitHub Models, Hugging Face, NVIDIA NIM, SambaNova** — *Settings → Providers*: click **Get key**, sign in, paste the key. All models on the account are listed automatically. |
-| Paid APIs | OpenAI, DeepSeek, Together AI |
-| On this machine | **Ollama** and **LM Studio** are detected automatically when they are running |
-| Anything else | **Custom endpoint** — any OpenAI-compatible URL (vLLM, llama-server, LiteLLM, a company gateway …), with or without a key |
-| No signup | Pollinations — an optional, clearly labelled keyless endpoint. It is off until you add it yourself. |
-
-Keys are stored only in your local `cs_data/config.json`, and the app never
-sends them back to the browser. CS Studio does not scrape websites or create
-accounts to get "free tokens". Every provider above offers its free tier
-officially.
-
-**Code workspace.** Open a project folder: file tree, viewer, editor, and an
-agent that reads, greps, edits files and runs commands in that folder. Each
-change it wants to make asks for your approval first. No model? The Code view
-offers a local coder: **Download & set up** fetches Qwen2.5-Coder (1.5B / 7B /
-14B GGUF) and llama.cpp, and after that it works fully offline.
-
-**Tools with approvals.** Turn on tool groups per chat: *Files & terminal*,
-*Web browsing*, *Computer use*, plus any MCP connector. Read-only tools run on their own.
-Anything that changes something (shell, writes, edits, mouse and keyboard)
-shows an **Allow once / Always allow / Deny** prompt. You can change this
-under *Settings → General*.
-
-**Built-in browser.** Search the web or open any address inside the app.
-**Reader** mode turns a page into clean text, and **Ask CS about this page**
-sends that text into a chat. The model can use the same browser as a tool.
-
-**Computer use.** With *Computer use* turned on, the model can take
-screenshots, move and click the mouse, type, scroll, and list and focus
-windows. Screenshots appear inline in the chat. The Windows / macOS / Linux
-binaries bundle the libraries. From source, run `cs install computer`.
-
-**Connectors (MCP).** Add Model Context Protocol servers from a gallery
-(filesystem, memory, fetch, git, time, sequential-thinking) or by command.
-You can also **import your Claude Desktop config** in one click. Their tools
-show up next to the built-in ones, as `server__tool`.
-
-**Routines.** Schedule prompts to run every N minutes or daily at a set time,
-with any model and tools, and a run log.
-
-**Settings.** Theme and accent, per-model context (system prompt, sampling,
-GPU layers, context length), runtime status and installs, Hugging Face
-downloads, and provider connections.
-
-**Try it with nothing installed.** The built-in **CS Echo** demo model lets you
-explore the app (including artifacts) before you connect anything.
-
-**Security.** Studio listens on `127.0.0.1` only. Each launch creates a random
-session token, and every API call must carry it. Requests from other origins
-or with a foreign `Host` header (DNS rebinding) are rejected. Artifacts and
-browsed pages render in sandboxed frames that cannot reach the API. File access
-is limited to the project folder you opened.
 
 ---
 
@@ -261,7 +332,7 @@ cs_data/
 ├── cache/        scan / hash / verify caches
 ├── tools/        downloaded binaries
 ├── plugins/      drop-in runtime and architecture hooks
-├── app/          CS Studio: chats, routines, connectors, window profile
+├── app/          Spark X: chats, routines, connectors, window profile
 ├── logs/
 └── agents/       agent connector configs
 ```
@@ -328,7 +399,7 @@ hub              huggingface_hub, hf_transfer
 sentencepiece    sentencepiece, protobuf
 einops           einops
 tiktoken         tiktoken
-computer         mss, pyautogui, pillow (computer use in CS Studio)
+computer         mss, pyautogui, pillow (computer use in Spark X)
 aider            aider-chat
 interpreter      open-interpreter
 ollama           official Ollama install script
@@ -613,6 +684,10 @@ Model search paths scanned automatically:
 | `CS_PREFER_PY` | `1` puts `llama.cpp-py` before binaries |
 | `CUDACXX` | Path to a specific `nvcc` |
 | `CUDA_PATH` | CUDA toolkit root |
+| `OLLAMA_HOST` | Where Spark X looks for (and starts) Ollama, e.g. `127.0.0.1:11434` |
+| `BLENDER_PATH` | The Blender executable to use |
+| `SPARKX_NO_NATIVE` | `1` opens Spark X in an Edge / Chrome app window or your browser instead of its own window |
+| `SPARKX_OFFLINE` | `1` skips the start-up network checks (free-model probe, catalog refresh) |
 
 ---
 
@@ -690,27 +765,35 @@ model's format details.
 
 ## Build from source
 
-The framework is pure standard library, so building a standalone binary needs
-only PyInstaller (add `mss pyautogui pillow` to bundle computer use):
+The framework is pure standard library, so building needs only PyInstaller
+(plus `mss pyautogui pillow` to bundle computer use, and `pywebview` for the
+desktop app's window):
 
 ```bash
-pip install pyinstaller mss pyautogui pillow
-pyinstaller cs.spec            # -> dist/cs   (dist/cs.exe on Windows)
+pip install pyinstaller mss pyautogui pillow pywebview
+pyinstaller cs.spec            # -> dist/cs            single-file CLI (cs.exe on Windows)
+pyinstaller sparkx.spec        # -> dist/Spark X/      the desktop app (+ cs) — macOS: dist/Spark X.app
 ```
 
-The result is **one file** containing the CLI, the server, CS Studio's
-frontend (`cs_studio/static`) and the app icon. Model runtimes (torch,
-transformers, llama.cpp, …) are **not** bundled. They are installed on demand
-with `cs install` (GGUF models use downloaded llama.cpp binaries), which keeps
-the binary small.
+`cs.spec` makes **one file** containing the CLI, the server, the app's
+frontend (`cs_studio/static`), the Blender bridge and the icon. `sparkx.spec`
+makes the installable app: `Spark X(.exe)` opens its own window with no
+console, and `cs(.exe)` next to it is the CLI. The Windows installer is built
+from that folder with [Inno Setup](https://jrsoftware.org/isinfo.php)
+(`iscc /DAppVersion=4.3.0 packaging\sparkx.iss`); the macOS `.dmg` with
+`hdiutil`. Model runtimes (torch, transformers, llama.cpp, …) are **not**
+bundled. They are installed on demand with `cs install` (GGUF models use
+downloaded llama.cpp binaries), which keeps the downloads small.
 
 The app icon is rendered from code: `python tools/render_icon.py` ray-marches
-the 3D mark with numpy and writes every PNG size plus `cs.ico` / `cs.icns`
-into `assets/`.
+the 3D mark with numpy and writes every PNG size plus `sparkx.ico` /
+`sparkx.icns` into `assets/`.
 
-Prebuilt binaries for Windows, Linux, and macOS (Apple Silicon) are built,
-smoke-tested (CLI + Studio) and published by the `Release` GitHub Actions
-workflow, either on a `v*` tag or by running it manually with a tag name.
+Every release is built by the `Release` GitHub Actions workflow (on a `v*` tag,
+or run manually with a tag name). It installs the Windows setup, opens the
+real app window on Windows and macOS and waits for the UI to report ready,
+smoke-tests the CLI binaries on all three platforms, and only then publishes.
+Pull requests run the same packaging checks.
 
 ## Testing
 
@@ -720,7 +803,8 @@ pip install pytest && pytest   # full suite in tests/
 ```
 
 CI runs the syntax check, `selftest`, and the pytest suite on Linux, macOS, and
-Windows across Python 3.9–3.12 on every push and pull request.
+Windows across Python 3.9–3.12 on every push and pull request, and on pull
+requests also builds and runs the installers.
 
 ## Contributing
 
@@ -728,7 +812,7 @@ Windows across Python 3.9–3.12 on every push and pull request.
 2. Create a feature branch: `git checkout -b feature/my-thing`.
 3. Run `python cs.py selftest` and `pytest` before opening a PR.
 4. Keep the framework in `cs.py`, with no new imports at module scope unless
-   they are wrapped in a try/except. CS Studio's frontend is plain
+   they are wrapped in a try/except. The Spark X frontend is plain
    HTML/CSS/JS in `cs_studio/static/`, with no build step and no gradients.
 
 ---

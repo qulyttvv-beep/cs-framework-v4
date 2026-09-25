@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cs-framework"
-version = "4.2.0"
-description = "Single-file portable local-LLM runner, model manager, and coding-agent hub"
+version = "4.3.0"
+description = "Spark X: a desktop AI app (chat, code, computer use, Blender) on a single-file local-LLM runner and agent hub"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "qulyttvv-beep" }]
-keywords = ["llm", "llama.cpp", "gguf", "transformers", "ollama", "cli", "openai", "agent"]
+keywords = ["llm", "llama.cpp", "gguf", "transformers", "ollama", "cli", "openai", "agent", "desktop", "computer-use", "blender"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
@@ -44,12 +44,15 @@ dev = ["pytest>=7", "pyinstaller>=6"]
 [project.scripts]
 cs = "cs:main"
 
+[project.gui-scripts]
+spark-x = "cs:gui_main"
+
 [tool.setuptools]
 py-modules = ["cs"]
 packages = ["cs_studio"]
 
 [tool.setuptools.package-data]
-cs_studio = ["static/*"]
+cs_studio = ["static/*", "blender/*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -20,6 +20,8 @@ sys.path.insert(0, str(ROOT))
 _TEST_HOME = Path(tempfile.mkdtemp(prefix="cs-tests-"))
 os.environ.setdefault("CS_HOME", str(_TEST_HOME))
 os.environ.setdefault("CS_NO_COLOR", "1")
+# no network from background warm-ups (free-model probe, catalog refresh)
+os.environ.setdefault("SPARKX_OFFLINE", "1")
 
 import pytest
 

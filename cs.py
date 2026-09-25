@@ -41,10 +41,30 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 import pathlib
 
+# The windowed Spark X app has no console: stdin/stdout/stderr are None, and
+# anything touching them (even sys.stdout.isatty() below) would crash at start.
+_NO_CONSOLE = sys.stdout is None or sys.stderr is None
+if sys.stdin is None or _NO_CONSOLE:
+    _null = open(os.devnull, "r+", encoding="utf-8")
+    sys.stdin = sys.stdin or _null
+    sys.stdout = sys.stdout or _null
+    sys.stderr = sys.stderr or _null
+    if os.name == "nt":
+        # Without a console of its own, every console program it starts (shell
+        # commands, git, nvidia-smi …) would flash up a black window.
+        _popen_init = subprocess.Popen.__init__
+
+        def _popen_no_window(self, *a, **kw):
+            if not kw.get("creationflags"):
+                kw["creationflags"] = 0x08000000                   # CREATE_NO_WINDOW
+            _popen_init(self, *a, **kw)
+        subprocess.Popen.__init__ = _popen_no_window
+
 APP       = "cs"
 APP_LONG  = "CS Framework"
-VERSION   = "4.2.0"
-CODENAME  = "studio-4.2"
+APP_UI    = "Spark X"          # the desktop app built on the framework
+VERSION   = "4.3.0"
+CODENAME  = "spark-x"
 
 
 # --- forced constants (repair patch) ---
@@ -55,6 +75,7 @@ MAX_SAFETENSORS_HDR = 200_000_000
 MAX_ARRAY_PREVIEW = 20_000
 MAX_HISTORY = 40
 MAX_TOOL_ROUNDS = 12
+AGENT_MAX_ROUNDS = 40            # Spark X agent: computer/Blender tasks take many steps
 MAX_TOOL_OUTPUT = 8000
 
 
@@ -202,7 +223,7 @@ def build_cli():
     rm = sub.add_parser("rm"); rm.add_argument("model")
     ct = sub.add_parser("ctx"); ct.add_argument("model")
     sv = sub.add_parser("serve"); sv.add_argument("--host", default="127.0.0.1"); sv.add_argument("--port", type=int, default=8686); sv.add_argument("--model", default=None)
-    apc = sub.add_parser("studio"); apc.add_argument("--host", default="127.0.0.1"); apc.add_argument("--port", type=int, default=8799); apc.add_argument("--model", default=None); apc.add_argument("--no-open", action="store_true")
+    apc = sub.add_parser("studio"); apc.add_argument("--host", default="127.0.0.1"); apc.add_argument("--port", type=int, default=8799); apc.add_argument("--model", default=None); apc.add_argument("--no-open", action="store_true"); apc.add_argument("--smoke", action="store_true", help="open the app window, check it boots, exit (CI)")
     ag = sub.add_parser("agents"); ag.add_argument("action", nargs="?", default="list", choices=["list","install","launch"]); ag.add_argument("agent", nargs="?"); ag.add_argument("--model", default=None)
     pi = sub.add_parser("plugin-init"); pi.add_argument("name")
     cl = sub.add_parser("clean"); cl.add_argument("--downloads", action="store_true")
@@ -330,10 +351,33 @@ def _self_invoke(*args) -> list:
     return [sys.executable, str(Path(__file__).resolve()), *argv]
 
 
+def _installed_layout() -> bool:
+    """True for an installed Spark X build (the Windows installer drops an
+    INSTALLED marker next to the exe; a macOS .app bundle is always installed).
+    Those must never write their data into the program folder."""
+    if not getattr(sys, "frozen", False):
+        return False
+    exe = Path(sys.executable).resolve()
+    return ".app/Contents/MacOS" in exe.as_posix() or (exe.parent / "INSTALLED").exists()
+
+
+def _user_data_dir() -> Path:
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return Path(base) / "Spark X"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Spark X"
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "spark-x"
+
+
 def _find_data_home() -> Path:
     env = os.environ.get("CS_HOME")
     if env:
         return Path(env).expanduser().resolve()
+    if _installed_layout():
+        d = _user_data_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        return d
     here = _app_dir()
     portable = here / "cs_data"
     # Portable mode if PORTABLE marker exists or cs_data/ already in use
@@ -2035,36 +2079,153 @@ class OpenAIRT(BaseRuntime):
         return r.kind == "platform" and (r.meta or {}).get("platform", r.name) == self.pname
     def stream(self, r, prompt, hist, ctx):
         msgs = list(hist) if hist else [{"role":"user","content":prompt}]
-        if ctx.get("system"): msgs = [{"role":"system","content":ctx["system"]}] + msgs
+        for kind, val in self.chat(r, msgs, ctx):
+            if kind == "text":
+                yield val
+
+    def _endpoint(self, r):
+        """(base_url, model, key, label) for this request."""
         model = (r.meta or {}).get("model") or self.pcfg.get("model") or "gpt-4o-mini"
-        body = json.dumps({"model": model,
-                           "messages": msgs, "stream": True,
-                           "temperature": float(ctx["temperature"]),
-                           "max_tokens": int(ctx["max_new_tokens"])}).encode()
-        headers = {"Content-Type": "application/json", "User-Agent": f"{APP_LONG}/{VERSION}",
-                   "X-Title": APP_LONG}
-        if self.pcfg.get("key"): headers["Authorization"] = "Bearer " + self.pcfg["key"]
-        req = urllib.request.Request(self.pcfg["base_url"].rstrip("/") + "/chat/completions",
-                                     data=body, headers=headers)
+        return self.pcfg["base_url"], model, self.pcfg.get("key"), self.pname
+
+    def chat(self, r, msgs, ctx, tools=None):
+        """Stream one completion. Yields ("text", str), ("think", str) and,
+        at the end, ("tool_calls", [{"id", "name", "arguments"}]) when the
+        model asked for tools via native function calling."""
+        base, model, key, label = self._endpoint(r)
+        yield from _openai_chat(base, model, key, label, msgs, ctx, tools)
+
+
+class ProviderError(RuntimeError):
+    """An HTTP/transport failure from a model endpoint. `retryable` marks
+    failures where another endpoint may succeed (rate limit, 5xx, network)."""
+    def __init__(self, msg, code=0, retryable=False):
+        super().__init__(msg)
+        self.code, self.retryable = code, retryable
+
+
+def _is_loopback(url):
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return host in ("localhost", "127.0.0.1", "::1") or host.startswith("127.")
+
+
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+def _urlopen(req, timeout):
+    """urlopen that never routes local endpoints (Ollama, LM Studio, the
+    Blender bridge…) through a system HTTP proxy."""
+    url = req.full_url if isinstance(req, urllib.request.Request) else str(req)
+    if _is_loopback(url):
+        return _NO_PROXY_OPENER.open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _openai_chat(base, model, key, label, msgs, ctx, tools=None):
+    sys_prompt = ctx.get("system")
+    if sys_prompt and not (msgs and msgs[0].get("role") == "system"):
+        msgs = [{"role": "system", "content": sys_prompt}] + list(msgs)
+    payload = {"model": model, "messages": msgs, "stream": True,
+               "temperature": float(ctx.get("temperature", 0.7)),
+               "max_tokens": int(ctx.get("max_new_tokens", 2048))}
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    headers = {"Content-Type": "application/json", "User-Agent": f"{APP_UI}/{VERSION}",
+               "X-Title": APP_UI, "HTTP-Referer": "https://github.com/qulyttvv-beep/cs-framework-v4"}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    req = urllib.request.Request(base.rstrip("/") + "/chat/completions",
+                                 data=json.dumps(payload).encode(), headers=headers)
+    try:
+        resp = _urlopen(req, timeout=300)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:600]
         try:
-            resp = urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT)
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")[:400]
+            j = json.loads(detail)
+            err = j.get("error")
+            detail = (err.get("message") if isinstance(err, dict) else err) or j.get("message") or detail
+        except Exception:
+            pass
+        raise ProviderError(f"{label} returned HTTP {e.code}: {detail}", e.code,
+                            retryable=e.code in (408, 425, 429) or e.code >= 500)
+    except (urllib.error.URLError, OSError) as e:
+        raise ProviderError(f"couldn't reach {label}: {getattr(e, 'reason', e)}", 0, retryable=True)
+    calls = {}
+    with resp:
+        for raw in resp:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            d = line[5:].strip()
+            if d == "[DONE]":
+                break
             try:
-                detail = json.loads(detail).get("error", {}).get("message") or detail
+                ch = json.loads(d)
             except Exception:
-                pass
-            raise RuntimeError(f"{self.pname} returned HTTP {e.code}: {detail}")
-        with resp:
-            for raw in resp:
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line.startswith("data:"): continue
-                d = line[5:].strip()
-                if d == "[DONE]": break
-                try:
-                    c = json.loads(d)["choices"][0]["delta"].get("content")
-                    if c: yield c
-                except Exception: pass
+                continue
+            if isinstance(ch, dict) and ch.get("error"):
+                e = ch["error"]
+                raise ProviderError(f"{label}: " + str(e.get("message") if isinstance(e, dict) else e))
+            for choice in (ch.get("choices") or [])[:1]:
+                delta = choice.get("delta") or choice.get("message") or {}
+                think = delta.get("reasoning_content") or delta.get("reasoning")
+                if isinstance(think, str) and think:
+                    yield ("think", think)
+                c = delta.get("content")
+                if isinstance(c, str) and c:
+                    yield ("text", c)
+                for tc in delta.get("tool_calls") or []:
+                    slot = calls.setdefault(tc.get("index", len(calls)), {"id": "", "name": "", "arguments": ""})
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    nm = fn.get("name")
+                    if nm and nm != slot["name"]:
+                        slot["name"] = nm if not slot["name"] else slot["name"] + nm
+                    args = fn.get("arguments")
+                    if isinstance(args, dict):          # some servers send objects
+                        slot["arguments"] = json.dumps(args)
+                    elif isinstance(args, str):
+                        slot["arguments"] += args
+    if calls:
+        out = []
+        for i in sorted(calls):
+            c = calls[i]
+            if c["name"]:
+                out.append({"id": c["id"] or f"call_{uuid.uuid4().hex[:10]}",
+                            "name": c["name"], "arguments": c["arguments"]})
+        if out:
+            yield ("tool_calls", out)
+
+
+def _parse_tool_args(raw):
+    """Arguments of a native tool call: tolerant of empty strings, objects and
+    servers that repeat the whole JSON in every chunk."""
+    if isinstance(raw, dict):
+        return raw
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else {"value": v}
+    except Exception:
+        pass
+    dec, i, last = json.JSONDecoder(), 0, None
+    while i < len(raw):
+        j = raw.find("{", i)
+        if j < 0:
+            break
+        try:
+            v, end = dec.raw_decode(raw, j)
+            if isinstance(v, dict):
+                last = v
+            i = end
+        except Exception:
+            i = j + 1
+    if last is None:
+        raise ValueError("tool arguments are not valid JSON")
+    return last
 
 
 # ─── prism fork helpers ────────────────────────────────────────────────────
@@ -2102,8 +2263,24 @@ def _prism_cli():
                 return str(p)
     return None
 
+_PRISM_CACHE = {}
+
 def needs_prism_fork(rec) -> bool:
     if getattr(rec, "kind", "") != "gguf": return False
+    try:
+        st = Path(rec.path).stat()
+        key = (str(rec.path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    if key in _PRISM_CACHE:
+        return _PRISM_CACHE[key]
+    res = _needs_prism_fork_uncached(rec)
+    if key:
+        _PRISM_CACHE[key] = res
+    return res
+
+
+def _needs_prism_fork_uncached(rec) -> bool:
     low = (getattr(rec, "name", "") or "").lower()
     if any(k in low for k in ("pq2", "ptq1", "ternary")): return True
     try:
@@ -2117,8 +2294,20 @@ def needs_prism_fork(rec) -> bool:
     return False
 
 
+_PLUGIN_SIG = {"sig": None}
+
 def load_plugins():
+    """Load drop-in runtime plugins. Re-executes plugin files only when the
+    plugins folder changed (this is called for every runtime lookup)."""
     global _PLUGIN_RTS
+    try:
+        sig = tuple((f.name, f.stat().st_mtime_ns, f.stat().st_size)
+                    for f in sorted(PLUGINS_D.glob("*.py"))) if PLUGINS_D.exists() else ()
+    except OSError:
+        sig = None
+    if sig is not None and sig == _PLUGIN_SIG["sig"] and "_PLUGIN_RTS" in globals():
+        return _PLUGIN_RTS
+    _PLUGIN_SIG["sig"] = sig
     _PLUGIN_RTS = []
     if not PLUGINS_D.exists(): return _PLUGIN_RTS
     api = types.ModuleType("cs_api")
@@ -2148,8 +2337,26 @@ def all_runtimes():
     rts += order
     rts += [TransformersRT(), OllamaRT()]
     for pn, pc in CFG.get("platforms", {}).items():
-        rts.append(OpenAIRT(pn, pc))
+        rts.append(FreeRT(pn, pc) if pc.get("free_auto") else OpenAIRT(pn, pc))
     return rts
+
+
+_AVAIL_CACHE = {}
+
+def _rt_available(rt, ttl=10.0):
+    """rt.available(), memoised briefly: it probes binaries, imports and
+    folders, and the model list asks it once per model on every refresh."""
+    key = (getattr(rt, "id", ""), getattr(rt, "pname", ""), json.dumps(getattr(rt, "pcfg", None), sort_keys=True, default=str))
+    hit = _AVAIL_CACHE.get(key)
+    now = time.time()
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    try:
+        ok = bool(rt.available()[0])
+    except Exception:
+        ok = False
+    _AVAIL_CACHE[key] = (now, ok)
+    return ok
 
 def pick_runtime(rec):
     # ternary models MUST use the PrismML fork
@@ -2164,21 +2371,14 @@ def pick_runtime(rec):
     except Exception:
         pass
 
+    rts = all_runtimes()
     cached_id = _RUNTIME_PICK.get(rec.slug())
     if cached_id:
-        for rt in all_runtimes():
-            try:
-                ok, _ = rt.available()
-            except Exception:
-                ok = False
-            if ok and rt.can_run(rec) and rt.id == cached_id:
+        for rt in rts:
+            if rt.id == cached_id and rt.can_run(rec) and _rt_available(rt):
                 return rt
-    for rt in all_runtimes():
-        try:
-            ok, _ = rt.available()
-        except Exception:
-            ok = False
-        if ok and rt.can_run(rec):
+    for rt in rts:
+        if rt.can_run(rec) and _rt_available(rt):
             _RUNTIME_PICK[rec.slug()] = rt.id
             return rt
     return None
@@ -2252,12 +2452,38 @@ def _t_webfetch(a, cwd=None):
     except Exception as e: return f"[fetch error: {e}]"
 
 
+def _python_exe():
+    """Argv prefix of a real Python for the `python` tool. From source that is
+    this interpreter; in the packaged app sys.executable is Spark X/cs itself,
+    so use a system Python if there is one (skipping the Microsoft Store stub),
+    else the bundled interpreter via the hidden --py-exec entry point."""
+    if not getattr(sys, "frozen", False):
+        return [sys.executable]
+    for name in (["py", "-3"], ["python3"], ["python"]):
+        exe = shutil.which(name[0])
+        if exe and "WindowsApps" not in exe:
+            return [exe] + name[1:]
+    return [sys.executable, "--py-exec"]
+
+
+def _py_exec(argv):
+    """`cs --py-exec -c CODE` / `cs --py-exec FILE`: run Python with the
+    interpreter bundled in the packaged app (standard library only)."""
+    import runpy
+    if argv[:1] == ["-c"] and len(argv) > 1:
+        sys.argv = ["-c"] + argv[2:]
+        exec(compile(argv[1], "<python>", "exec"), {"__name__": "__main__"})
+    elif argv:
+        sys.argv = argv
+        runpy.run_path(argv[0], run_name="__main__")
+
+
 def _t_python(a, cwd=None):
     code = a.get("code") or a.get("src") or ""
     if not code:
         return "[python: missing code]"
     try:
-        r = subprocess.run([sys.executable, "-c", code],
+        r = subprocess.run(_python_exe() + ["-c", code],
                            capture_output=True, text=True, timeout=60,
                            cwd=cwd, errors="replace")
         out = (r.stdout or "") + (r.stderr or "")
@@ -3657,7 +3883,7 @@ def cmd_serve(host, port, model=None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  CS Studio — the graphical app, served by the framework itself
+#  Spark X — the desktop app, served by the framework itself
 #  chat · artifacts · code workspace · browser · computer use · connectors
 #  (MCP) · routines · providers.   Frontend: cs_studio/static/
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3731,10 +3957,10 @@ _STATIC_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset
                  ".png": "image/png", ".ico": "image/x-icon", ".json": "application/json",
                  ".woff2": "font/woff2", ".webp": "image/webp"}
 
-_STUDIO_MISSING_HTML = ("<!doctype html><meta charset=utf-8><title>CS Studio</title>"
+_STUDIO_MISSING_HTML = ("<!doctype html><meta charset=utf-8><title>Spark X</title>"
                         "<body style='background:#1f1e1c;color:#ecebe6;font:15px system-ui;"
                         "display:grid;place-items:center;height:100vh;margin:0'><div>"
-                        "<h2>CS Studio files not found</h2><p>The <code>cs_studio/</code> folder "
+                        "<h2>Spark X app files not found</h2><p>The <code>cs_studio/</code> folder "
                         "must sit next to <code>cs.py</code>. Use the release executable or the "
                         "full repository.</p></div>")
 
@@ -3807,12 +4033,19 @@ def _model_info_list():
     for r in platform_records():
         meta = r.meta or {}
         pid = meta.get("platform", r.name)
+        if pid == "free":
+            best = next((x for x in _FREE["results"] if x.get("ok")), None)
+            out.append({"id": r.name, "name": "Free model", "kind": "api", "group": "Free",
+                        "provider": "free", "free": True, "auto": True, "vision": _rec_vision(r),
+                        "via": (best or {}).get("name", ""), "runtime": "api", "ready": True, "local": False})
+            continue
+        caps = _OLLAMA["caps"].get(meta.get("model")) if pid == "ollama" else None
         out.append({"id": r.name, "name": meta.get("model") or r.name, "kind": "api",
                     "group": names.get(pid, pid), "provider": pid,
                     "free": bool((_prov(pid) or {}).get("free")) or str(meta.get("model", "")).endswith(":free"),
-                    "vision": _is_vision(meta.get("model") or r.name),
-                    "runtime": "api", "ready": True, "local": False})
-    out.append({"id": DEMO_MODEL_ID, "name": "CS Echo (demo)", "kind": "demo", "group": "Built-in",
+                    "vision": _rec_vision(r), "tools": ("tools" in caps) if caps is not None else None,
+                    "runtime": "api", "ready": True, "local": pid in ("ollama", "lmstudio")})
+    out.append({"id": DEMO_MODEL_ID, "name": "Spark Echo (demo)", "kind": "demo", "group": "Built-in",
                 "runtime": "builtin", "ready": True, "local": True})
     return out
 
@@ -3829,12 +4062,27 @@ def _runtime_info_list():
     return out
 
 
-_VISION_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4", "gemini", "llama-4", "vision",
-                 "-vl", "pixtral", "grok", "gemma-3", "llava", "minicpm-v", "qwen2.5-vl")
+_VISION_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4", "gemini", "llama-4", "llama4", "vision",
+                 "-vl", "vl:", "2.5vl", "pixtral", "grok", "gemma-3", "gemma3", "llava", "minicpm-v",
+                 "qwen2.5-vl", "mistral-small3.1", "mistral-small3.2", "mistral-small-3.1",
+                 "mistral-small-3.2", "moondream", "granite3.2-vision")
 
 def _is_vision(model_id):
     m = str(model_id or "").lower()
     return any(h in m for h in _VISION_HINTS)
+
+
+def _rec_vision(rec):
+    """Can this model see images? Ollama tells us; otherwise go by name."""
+    meta = rec.meta or {}
+    pid, mname = meta.get("platform", ""), meta.get("model") or rec.name
+    if pid == "ollama" and mname in _OLLAMA["caps"]:
+        return "vision" in _OLLAMA["caps"][mname]
+    if pid == "free":
+        return any(x.get("ok") and x.get("vision") and x.get("id") == _FREE.get("last_good")
+                   for x in _FREE["results"]) or (not _FREE.get("last_good") and any(
+                   x.get("ok") and x.get("vision") for x in _FREE["results"][:1]))
+    return _is_vision(mname)
 
 
 # ── providers: OpenAI-compatible endpoints, many with genuine free tiers ─────
@@ -3866,10 +4114,6 @@ PROVIDERS = [
     {"id": "sambanova", "name": "SambaNova", "base_url": "https://api.sambanova.ai/v1",
      "key_url": "https://cloud.sambanova.ai/apis", "free": True,
      "note": "Free tier.", "model": "Meta-Llama-3.3-70B-Instruct"},
-    {"id": "pollinations", "name": "Pollinations (no signup)", "base_url": "https://text.pollinations.ai/openai",
-     "key_url": "https://pollinations.ai", "free": True, "no_key": True, "opt_in": True,
-     "note": "Community-run, no account needed, rate-limited. Your messages are sent to pollinations.ai.",
-     "model": "openai"},
     {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1",
      "key_url": "https://platform.openai.com/api-keys", "free": False,
      "note": "GPT models.", "model": "gpt-4o-mini"},
@@ -3898,7 +4142,6 @@ _PROVIDER_FALLBACK_MODELS = {
     "huggingface": ["meta-llama/Llama-3.3-70B-Instruct", "Qwen/Qwen2.5-Coder-32B-Instruct"],
     "nvidia": ["meta/llama-3.3-70b-instruct", "qwen/qwen2.5-coder-32b-instruct"],
     "sambanova": ["Meta-Llama-3.3-70B-Instruct"],
-    "pollinations": ["openai", "mistral", "qwen-coder"],
     "openai": ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1"],
     "deepseek": ["deepseek-chat", "deepseek-reasoner"],
     "together": ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
@@ -3925,8 +4168,8 @@ def _http_json(url, headers=None, timeout=15):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8", "replace") or "{}")
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "replace")[:240]
-        raise RuntimeError(f"HTTP {e.code}: {body}")
+        body = e.read().decode("utf-8", "replace")[:240].strip()
+        raise RuntimeError(f"HTTP {e.code}" + (f": {body}" if body else f" {e.reason}"))
 
 
 def _fetch_models(base_url, key=None, pid=None, timeout=12):
@@ -4007,25 +4250,29 @@ def _provider_connect(pid, key="", base_url="", name=""):
 
 _LOCAL_PROBE = {"ts": 0.0}
 
-def _autodetect_local():
+def _autodetect_local(force=False):
     """Auto-connect Ollama / LM Studio when they are running (no setup needed)."""
-    if time.time() - _LOCAL_PROBE["ts"] < 20:
+    if not force and time.time() - _LOCAL_PROBE["ts"] < 20:
         return
     _LOCAL_PROBE["ts"] = time.time()
     for pid in ("ollama", "lmstudio"):
         p = _prov(pid)
+        base = _ollama_base() + "/v1" if pid == "ollama" else p["base_url"]
         try:
-            models = _fetch_models(p["base_url"], None, pid, timeout=1.5)
+            models = _fetch_models(base, None, pid, timeout=1.5)
         except Exception:
             continue
-        if not models:
+        plats = CFG.setdefault("platforms", {})
+        pc = plats.get(pid) or {}
+        if not models:                      # server up but every model deleted
+            if pc.get("auto"):
+                plats.pop(pid, None); save_cfg()
             continue
-        pc = CFG.setdefault("platforms", {}).get(pid) or {}
-        if pc.get("models") != models:
-            pc.update({"base_url": p["base_url"], "no_key": True, "models": models,
+        if pc.get("models") != models or pc.get("base_url") != base:
+            pc.update({"base_url": base, "no_key": True, "models": models,
                        "model": pc.get("model") if pc.get("model") in models else models[0],
                        "provider": pid, "auto": True})
-            CFG["platforms"][pid] = pc
+            plats[pid] = pc
             save_cfg()
 
 
@@ -4383,16 +4630,14 @@ def _t_browse(a, cwd=None):
 TOOLS_IMPL.update({"edit": _t_edit, "browse": _t_browse})
 
 _TOOLSETS = {
-    "code": ["bash", "read", "write", "edit", "append", "ls", "glob", "grep", "tree",
-             "find", "diff", "wc", "python"],
-    "web": ["browse", "web_fetch", "http", "download"],
-    "computer": ["screen", "screen_size", "mouse_move", "mouse_click", "mouse_drag", "scroll",
-                 "key", "type", "window_list", "window_focus", "app_start", "sleep", "ocr",
-                 "clip_read", "clip_write"],
+    "code": ["bash", "read", "write", "edit", "ls", "glob", "grep", "python"],
+    "web": ["browse", "download"],
+    "computer": ["computer", "open", "bash"],
+    "blender": ["blender"],
 }
+# tools that change something ask first (computer/blender decide per action)
 _APPROVAL_TOOLS = {"bash", "write", "append", "edit", "python", "download", "extract",
-                   "clip_write", "mouse_move", "mouse_click", "mouse_drag", "scroll",
-                   "key", "type", "app_start", "window_focus"}
+                   "clip_write", "open"}
 
 
 def _computer_status():
@@ -4484,6 +4729,1243 @@ def _coder_setup(preset):
                       watch_dir=DL_D / "hf" / p["repo"].replace("/", "__"))
 
 
+# ══ Spark X: free models · hardware · Ollama · model catalog ═════════════════
+def _pref(key, default=None):
+    return CFG.get("prefs", {}).get(key, default)
+
+
+# ── free cloud models (no signup) ────────────────────────────────────────────
+# Services that officially offer anonymous, keyless access to an OpenAI-
+# compatible endpoint. Nothing here scrapes a website or creates accounts. The
+# list can be updated without a release through the remote catalog, and a
+# service that stops answering is simply skipped (requests fail over).
+FREE_PROVIDERS = [
+    {"id": "pollinations", "name": "Pollinations", "home": "https://pollinations.ai",
+     "base_url": "https://text.pollinations.ai/openai", "probe": "https://text.pollinations.ai/models",
+     "prefer": ["openai", "openai-fast", "mistral", "qwen-coder", "llama"]},
+    {"id": "llm7", "name": "LLM7", "home": "https://llm7.io",
+     "base_url": "https://api.llm7.io/v1", "probe": "https://api.llm7.io/v1/models",
+     "prefer": ["gpt-4.1-nano", "gpt-4o-mini", "mistral-small", "qwen", "llama", "deepseek"]},
+]
+_FREE = {"ts": 0.0, "results": [], "lock": threading.Lock(), "last_good": None}
+
+
+def _free_providers():
+    env = os.environ.get("SPARKX_FREE_PROVIDERS")          # tests / power users
+    if env:
+        try:
+            return json.loads(env)
+        except Exception:
+            pass
+    remote = (_CATALOG.get("data") or {}).get("free_providers")
+    if isinstance(remote, list) and remote and all(isinstance(x, dict) and x.get("base_url") for x in remote):
+        return remote
+    return FREE_PROVIDERS
+
+
+def _free_models_from(payload):
+    items = payload.get("data") if isinstance(payload, dict) else payload
+    if items is None and isinstance(payload, dict):
+        items = payload.get("models", [])
+    out = []
+    for m in items or []:
+        if isinstance(m, dict):
+            mid = m.get("id") or m.get("name")
+            outs = " ".join(str(x) for x in (m.get("output_modalities") or []))
+            if not mid or (outs and "text" not in outs):
+                continue
+            out.append({"id": str(mid), "vision": bool(m.get("vision")) or "image" in " ".join(
+                str(x) for x in (m.get("input_modalities") or [])), "tools": m.get("tools")})
+        elif isinstance(m, str):
+            out.append({"id": m, "vision": False, "tools": None})
+    return [m for m in out if not any(b in m["id"].lower() for b in _NON_CHAT)]
+
+
+def _free_pick(models, prefer):
+    ids = [m["id"] for m in models]
+    for p in prefer or []:
+        for m in models:
+            if m["id"].lower() == p or m["id"].lower().startswith(p):
+                return m
+    return models[0] if ids else None
+
+
+def _free_probe(force=False, timeout=6.0):
+    """Which free services answer right now (only their public model lists
+    are fetched — no prompts are sent). Cached for 10 minutes."""
+    with _FREE["lock"]:
+        if not force and _FREE["results"] and time.time() - _FREE["ts"] < 600:
+            return _FREE["results"]
+
+    def one(fp):
+        t0 = time.time()
+        try:
+            models = _free_models_from(_http_json(fp["probe"], timeout=timeout))
+            pick = _free_pick(models, fp.get("prefer"))
+            if not pick:
+                raise RuntimeError("no chat models listed")
+            return {"id": fp["id"], "name": fp["name"], "home": fp.get("home", ""), "ok": True,
+                    "latency_ms": int((time.time() - t0) * 1000), "model": pick["id"],
+                    "vision": bool(pick.get("vision")), "models": [m["id"] for m in models][:40]}
+        except Exception as e:
+            return {"id": fp["id"], "name": fp["name"], "home": fp.get("home", ""), "ok": False,
+                    "error": str(e)[:160]}
+
+    import concurrent.futures as _cf
+    provs = _free_providers()
+    with _cf.ThreadPoolExecutor(max_workers=max(1, len(provs))) as ex:
+        res = list(ex.map(one, provs))
+    res.sort(key=lambda r: (not r["ok"], r.get("latency_ms", 1e9)))
+    with _FREE["lock"]:
+        _FREE["results"], _FREE["ts"] = res, time.time()
+    return res
+
+
+def _free_enabled():
+    return bool((CFG.get("platforms", {}).get("free") or {}).get("free_auto"))
+
+
+def _free_enable():
+    res = _free_probe(force=True)
+    CFG.setdefault("platforms", {})["free"] = {
+        "name": "Free", "provider": "free", "free_auto": True, "no_key": True,
+        "base_url": "auto", "models": ["auto"], "model": "auto"}
+    prefs = CFG.setdefault("prefs", {})
+    if not prefs.get("default_model") or prefs.get("default_model") == DEMO_MODEL_ID:
+        prefs["default_model"] = "free/auto"
+    save_cfg()
+    return res
+
+
+class FreeRT(OpenAIRT):
+    """`free/auto`: the fastest free service that answers, failing over to
+    the next one when a service is down or rate-limited."""
+    def available(self):
+        return True, ""
+
+    def chat(self, r, msgs, ctx, tools=None):
+        ok = [x for x in _free_probe() if x.get("ok")] or [x for x in _free_probe(force=True) if x.get("ok")]
+        if not ok:
+            raise ProviderError("No free AI service is reachable right now. Try again in a minute, connect a "
+                                "free-tier key in Settings → Providers, or run a local model with Ollama.")
+        ok.sort(key=lambda x: x["id"] != _FREE.get("last_good"))
+        bases = {f["id"]: f["base_url"] for f in _free_providers()}
+        errors = []
+        for fp in ok:
+            started = False
+            try:
+                for ev in _openai_chat(bases[fp["id"]], fp["model"], None, fp["name"], msgs, ctx, tools):
+                    if not started:
+                        started = True
+                        _FREE["last_good"] = fp["id"]
+                        yield ("provider", fp["name"])
+                    yield ev
+                return
+            except ProviderError as e:
+                if started or (tools and _tools_unsupported(e)):
+                    raise
+                errors.append(str(e))
+        raise ProviderError("The free AI services didn't answer: " + " · ".join(errors[:3]))
+
+
+def _tools_unsupported(e):
+    code = getattr(e, "code", 0)
+    return code in (400, 404, 422, 501) and bool(re.search(r"tool|function", str(e), re.I))
+
+
+# ── hardware ─────────────────────────────────────────────────────────────────
+_HW = {}
+
+def _total_ram_bytes():
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (AttributeError, ValueError, OSError):
+        pass
+    if os.name == "nt":
+        try:
+            import ctypes
+            class _MS(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("sullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            st = _MS(); st.dwLength = ctypes.sizeof(_MS)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st))
+            return int(st.ullTotalPhys)
+        except Exception:
+            return 0
+    try:
+        return int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
+                                  timeout=5).stdout.strip() or 0)
+    except Exception:
+        return 0
+
+
+def _hardware():
+    if _HW:
+        return _HW
+    ram = _total_ram_bytes()
+    vram, gpu = 0.0, ""
+    if shutil.which("nvidia-smi"):
+        rc, out = run_cmd(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"], timeout=10)
+        if rc == 0:
+            for line in out.strip().splitlines():
+                parts = [x.strip() for x in line.split(",")]
+                if len(parts) >= 2:
+                    try:
+                        mib = float(parts[1])
+                    except ValueError:
+                        continue
+                    if mib / 1024 > vram:
+                        vram, gpu = mib / 1024, parts[0]
+    apple = sys.platform == "darwin" and platform.machine() == "arm64"
+    _HW.update({"ram_gb": round(ram / 2 ** 30, 1), "vram_gb": round(vram, 1),
+                "gpu": gpu or ("Apple Silicon (unified memory)" if apple else ""),
+                "apple_silicon": apple, "cpu_threads": os.cpu_count() or 0,
+                "os": {"win32": "Windows", "darwin": "macOS"}.get(sys.platform, "Linux")})
+    return _HW
+
+
+# ── Ollama: detect, start, keep alive ("revive"), pull, delete ──────────────
+_OLLAMA = {"proc": None, "started_by_us": False, "revived": 0, "fails": 0, "ever_up": False,
+           "lock": threading.Lock(), "caps": {}, "last_error": ""}
+
+
+def _ollama_base():
+    h = (os.environ.get("OLLAMA_HOST") or "127.0.0.1:11434").strip()
+    if not re.match(r"^https?://", h):
+        h = "http://" + h
+    h = h.replace("://0.0.0.0", "://127.0.0.1")
+    if not re.search(r":\d+$", h.split("//", 1)[-1]):
+        h += ":11434"
+    return h.rstrip("/")
+
+
+def _ollama_bin():
+    w = shutil.which("ollama")
+    if w:
+        return w
+    cands = []
+    if os.name == "nt":
+        la = os.environ.get("LOCALAPPDATA", "")
+        if la:
+            cands.append(Path(la) / "Programs" / "Ollama" / "ollama.exe")
+        cands.append(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Ollama" / "ollama.exe")
+    elif sys.platform == "darwin":
+        cands += [Path("/Applications/Ollama.app/Contents/Resources/ollama"),
+                  Path("/opt/homebrew/bin/ollama"), Path("/usr/local/bin/ollama")]
+    else:
+        cands += [Path("/usr/local/bin/ollama"), Path("/usr/bin/ollama"), Path.home() / ".local/bin/ollama"]
+    for c in cands:
+        if c.is_file():
+            return str(c)
+    return None
+
+
+def _ollama_req(path, body=None, timeout=3.0, method=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(_ollama_base() + path, data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
+    with _urlopen(req, timeout) as r:
+        raw = r.read()
+    return json.loads(raw or b"{}")
+
+
+def _ollama_version(timeout=1.5):
+    try:
+        v = _ollama_req("/api/version", timeout=timeout).get("version") or "?"
+    except Exception:
+        return None
+    _OLLAMA["ever_up"] = True
+    return v
+
+
+def _ollama_caps(name):
+    """Capabilities of an installed model (vision, tools, thinking), from /api/show."""
+    if name in _OLLAMA["caps"]:
+        return _OLLAMA["caps"][name]
+    caps = []
+    try:
+        caps = _ollama_req("/api/show", {"model": name, "name": name}, timeout=4).get("capabilities") or []
+    except Exception:
+        pass
+    _OLLAMA["caps"][name] = caps
+    return caps
+
+
+def _ollama_status():
+    ver = _ollama_version()
+    exe = _ollama_bin()
+    st = {"installed": bool(exe) or ver is not None, "bin": exe or "", "running": ver is not None,
+          "version": ver or "", "managed": _OLLAMA["started_by_us"], "revived": _OLLAMA["revived"],
+          "keep_alive": bool(_pref("ollama_keep_alive", True)), "base_url": _ollama_base(),
+          "error": _OLLAMA["last_error"], "models": []}
+    if ver:
+        try:
+            for m in _ollama_req("/api/tags", timeout=4).get("models", []):
+                d = m.get("details") or {}
+                name = m.get("name") or m.get("model")
+                st["models"].append({"name": name, "size": m.get("size", 0), "size_h": human(m.get("size", 0)),
+                                     "params": d.get("parameter_size", ""), "quant": d.get("quantization_level", ""),
+                                     "family": d.get("family", ""), "caps": _ollama_caps(name)})
+        except Exception as e:
+            st["error"] = str(e)[:200]
+    return st
+
+
+def _ollama_start(wait=30.0):
+    """Start `ollama serve` in the background (or the Ollama app on macOS)
+    and wait until the API answers."""
+    with _OLLAMA["lock"]:
+        if _ollama_version(1.0):
+            return True, "running"
+        exe = _ollama_bin()
+        proc = None
+        if exe:
+            APP_D.mkdir(parents=True, exist_ok=True)
+            logf = open(APP_D / "ollama.log", "ab")
+            kw = dict(stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+            if os.name == "nt":
+                kw["creationflags"] = 0x08000000 | 0x00000200     # no window, own process group
+            else:
+                kw["start_new_session"] = True                    # survives Spark X closing
+            proc = subprocess.Popen([exe, "serve"], **kw)
+            _OLLAMA["proc"], _OLLAMA["started_by_us"] = proc, True
+        elif sys.platform == "darwin" and Path("/Applications/Ollama.app").exists():
+            subprocess.Popen(["open", "-ga", "Ollama"])
+        else:
+            _OLLAMA["last_error"] = "Ollama isn't installed"
+            return False, _OLLAMA["last_error"]
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            if _ollama_version(1.0):
+                _LOCAL_PROBE["ts"] = 0.0
+                _OLLAMA["last_error"] = ""
+                return True, "started"
+            if proc is not None and proc.poll() is not None:
+                try:
+                    tail = (APP_D / "ollama.log").read_text(encoding="utf-8", errors="replace")[-400:]
+                except Exception:
+                    tail = ""
+                _OLLAMA["last_error"] = "ollama serve exited: " + tail.strip().splitlines()[-1] if tail.strip() else "ollama serve exited"
+                return False, _OLLAMA["last_error"]
+            time.sleep(0.4)
+        _OLLAMA["last_error"] = "Ollama didn't start within %d s" % wait
+        return False, _OLLAMA["last_error"]
+
+
+def _ollama_watchdog():
+    """Start Ollama when Spark X opens and bring it back if it dies."""
+    every = float(os.environ.get("SPARKX_WATCHDOG_S") or 12)
+    backoff = every
+    while not _APP_SCHED["stop"]:
+        was_up = _OLLAMA["ever_up"]                 # seen running at any point this session
+        up = _ollama_version(1.5) is not None
+        if up:
+            backoff, _OLLAMA["fails"] = every, 0
+        elif _pref("ollama_keep_alive", True) and (_ollama_bin() or was_up) and \
+                (was_up or _pref("ollama_autostart", True)):
+            ok, msg = _ollama_start()
+            if ok:
+                if was_up:
+                    _OLLAMA["revived"] += 1
+                    log("ollama revived")
+                _autodetect_local(force=True)
+            else:
+                _OLLAMA["fails"] += 1
+                backoff = min(300, every * (2 ** min(_OLLAMA["fails"], 5)))
+                log(f"ollama start failed: {msg}", "warn")
+        end = time.time() + backoff
+        while time.time() < end:
+            if _APP_SCHED["stop"]:
+                return
+            time.sleep(min(1.0, backoff))
+
+
+def _ollama_pull(name):
+    name = str(name or "").strip()
+    if not re.match(r"^[\w./:@-]+$", name):
+        raise ValueError("not a valid model name")
+    jid = uuid.uuid4().hex[:8]
+    job = {"id": jid, "title": "Download " + name, "status": "running", "log": [], "step": 1, "steps": 1,
+           "started": time.time(), "progress": 0.0, "kind": "ollama-pull", "model": name, "cancel": False}
+    _JOBS[jid] = job
+
+    def run():
+        try:
+            if not _ollama_version(1.5):
+                ok, msg = _ollama_start()
+                if not ok:
+                    raise RuntimeError(msg)
+            req = urllib.request.Request(_ollama_base() + "/api/pull",
+                                         data=json.dumps({"model": name, "name": name, "stream": True}).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with _urlopen(req, 300) as r:
+                for raw in r:
+                    if job["cancel"]:
+                        raise RuntimeError("cancelled")
+                    try:
+                        d = json.loads(raw)
+                    except Exception:
+                        continue
+                    if d.get("error"):
+                        raise RuntimeError(d["error"])
+                    status = d.get("status", "")
+                    if d.get("total"):
+                        job["progress"] = round(d.get("completed", 0) / d["total"], 4)
+                        status += f" · {human(d.get('completed', 0))} / {human(d['total'])}"
+                    if job["log"] and job["log"][-1].split(" · ")[0] == status.split(" · ")[0]:
+                        job["log"][-1] = status
+                    else:
+                        job["log"].append(status)
+                    job["log"] = job["log"][-60:]
+            job["status"], job["progress"] = "done", 1.0
+            _OLLAMA["caps"].pop(name, None)
+            _autodetect_local(force=True)
+        except Exception as e:
+            job["status"], job["error"] = "error", str(e)[:300]
+        finally:
+            job["ended"] = time.time()
+
+    threading.Thread(target=run, daemon=True).start()
+    return job
+
+
+def _ollama_delete(name):
+    _ollama_req("/api/delete", {"model": name, "name": name}, timeout=20, method="DELETE")
+    _OLLAMA["caps"].pop(name, None)
+    _autodetect_local(force=True)
+
+
+# ── model catalog: curated picks + live trending ─────────────────────────────
+CATALOG_URL = "https://raw.githubusercontent.com/qulyttvv-beep/cs-framework-v4/main/cs_studio/static/catalog.json"
+_CATALOG = {"data": None, "source": "", "ts": 0.0, "fetching": False}
+_TRENDING = {"ts": 0.0, "data": []}
+
+
+def _catalog_newer(a, b):
+    """True when catalog a is newer than b (by its `updated` date)."""
+    return str((a or {}).get("updated", "")) > str((b or {}).get("updated", ""))
+
+
+def _catalog():
+    if _CATALOG["data"] is None:
+        base = _studio_static_dir()
+        bundled = jload(base / "catalog.json", None) if base else None
+        cached = jload(APP_D / "catalog.json", None)
+        if cached and cached.get("models") and _catalog_newer(cached, bundled):
+            _CATALOG.update(data=cached, source="updated")
+        else:
+            _CATALOG.update(data=bundled or {"models": []}, source="bundled")
+    stale = time.time() - (_CATALOG["ts"] or 0) > 86400
+    if stale and not _CATALOG["fetching"] and not os.environ.get("SPARKX_OFFLINE"):
+        _CATALOG["fetching"] = True
+        threading.Thread(target=_catalog_refresh, daemon=True).start()
+    return _CATALOG["data"]
+
+
+def _catalog_refresh():
+    try:
+        d = _http_json(os.environ.get("SPARKX_CATALOG_URL") or CATALOG_URL, timeout=8)
+        if isinstance(d, dict) and isinstance(d.get("models"), list) and d["models"]:
+            if _catalog_newer(d, _CATALOG["data"]):
+                _CATALOG.update(data=d, source="updated")
+            jsave(APP_D / "catalog.json", d)
+    except Exception as e:
+        log(f"catalog refresh: {e}", "warn")
+    finally:
+        _CATALOG["ts"] = time.time()
+        _CATALOG["fetching"] = False
+
+
+def _catalog_view():
+    data = _catalog()
+    hw = _hardware()
+    ram, vram, apple = hw["ram_gb"] or 8, hw["vram_gb"], hw["apple_silicon"]
+    installed = set()
+    ost = None
+    if _ollama_version(1.0):
+        try:
+            ost = _ollama_req("/api/tags", timeout=4).get("models", [])
+            for m in ost:
+                n = m.get("name", "")
+                installed |= {n, n[:-7] if n.endswith(":latest") else n + ":latest"}
+        except Exception:
+            pass
+    models = []
+    for m in data.get("models", []):
+        m = dict(m)
+        need = float(m.get("min_ram", 8))
+        m["fits"] = need <= max(ram, vram) + 0.5
+        m["fast"] = (vram >= float(m.get("size_gb", 99)) * 1.2) or (apple and float(m.get("size_gb", 99)) <= ram * 0.55)
+        m["installed"] = m.get("id") in installed
+        models.append(m)
+    best = {}
+    for m in models:
+        if not m["fits"]:
+            continue
+        for tag in ("general", "coding", "vision", "reasoning", "computer"):
+            if tag in (m.get("tags") or []) or (tag == "general" and "general" not in m.get("tags", [])
+                                                  and "chat" in m.get("tags", [])):
+                cur = best.get(tag)
+                if cur is None or m.get("score", 0) > cur.get("score", 0):
+                    best[tag] = m
+    for tag, m in best.items():
+        m.setdefault("best_for", []).append(tag)
+    return {"hardware": hw, "updated": data.get("updated", ""), "source": _CATALOG["source"],
+            "models": models, "ollama": bool(ost is not None)}
+
+
+def _hf_trending(limit=24):
+    """Trending GGUF models on Hugging Face (official public API), cached 1 h.
+    Each one can be pulled into Ollama as hf.co/<repo>."""
+    if _TRENDING["data"] and time.time() - _TRENDING["ts"] < 3600:
+        return _TRENDING["data"]
+    base = os.environ.get("SPARKX_HF_API") or "https://huggingface.co/api/models"
+    items = None
+    for sort in ("trendingScore", "downloads"):
+        try:
+            items = _http_json(f"{base}?filter=gguf&sort={sort}&direction=-1&limit=60", timeout=8)
+            break
+        except Exception as e:
+            err = e
+    if items is None:
+        raise RuntimeError(f"Hugging Face didn't answer: {err}")
+    out = []
+    for m in items if isinstance(items, list) else []:
+        rid = m.get("id") or m.get("modelId")
+        pt = m.get("pipeline_tag") or ""
+        if not rid or (pt and pt not in ("text-generation", "image-text-to-text")):
+            continue
+        out.append({"id": rid, "pull": "hf.co/" + rid, "likes": m.get("likes", 0),
+                    "downloads": m.get("downloads", 0), "created": str(m.get("createdAt", ""))[:10],
+                    "vision": pt == "image-text-to-text"})
+        if len(out) >= limit:
+            break
+    _TRENDING.update(ts=time.time(), data=out)
+    return out
+
+
+# ══ Spark X: using the computer ══════════════════════════════════════════════
+_CU_STATE = {"geom": None, "lock": threading.Lock()}
+_WEBVIEW = {"window": None}
+
+
+def _cu_capture(max_w=None):
+    """Screenshot of the primary screen, scaled for the model. Returns
+    (path, shot_w, shot_h). The cursor is drawn on the image so the model
+    can see where the mouse is; coordinates the model gives back are in this
+    image's pixel space and mapped to real screen coordinates."""
+    import mss
+    from PIL import Image, ImageDraw
+    pg = _pyautogui()
+    with (getattr(mss, "MSS", None) or mss.mss)() as sct:
+        mon = sct.monitors[1]
+        raw = sct.grab(mon)
+        img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+    lw, lh = (pg.size() if pg else (mon["width"], mon["height"]))
+    mw = int(max_w or _pref("computer_shot_width", 1280) or 1280)
+    tw = max(320, min(mw, lw))
+    th = max(200, round(lh * tw / lw))
+    img = img.resize((tw, th), Image.LANCZOS)
+    if pg:
+        try:
+            cx, cy = pg.position()
+            x, y = cx * tw / lw, cy * th / lh
+            d = ImageDraw.Draw(img)
+            d.ellipse((x - 9, y - 9, x + 9, y + 9), outline=(0, 0, 0), width=4)
+            d.ellipse((x - 9, y - 9, x + 9, y + 9), outline=(255, 255, 255), width=2)
+            d.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(230, 60, 40))
+        except Exception:
+            pass
+    d = _ensure_screen_dir()
+    path = d / f"screen_{int(time.time() * 1000)}.jpg"
+    img.save(path, "JPEG", quality=72, optimize=True)
+    try:
+        shots = sorted(d.glob("screen_*.jpg"))
+        for old in shots[:-80]:
+            old.unlink()
+    except Exception:
+        pass
+    _CU_STATE["geom"] = (tw, th, lw, lh)
+    return str(path), tw, th
+
+
+def _cu_point(a, kx="x", ky="y"):
+    if _CU_STATE["geom"] is None:
+        _cu_capture()
+    tw, th, lw, lh = _CU_STATE["geom"]
+    try:
+        x, y = float(a[kx]), float(a[ky])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError(f"'{kx}' and '{ky}' (pixels in the last screenshot) are required")
+    x, y = min(max(x, 0), tw - 1), min(max(y, 0), th - 1)
+    return round(x * lw / tw), round(y * lh / th)
+
+
+_KEY_ALIASES = {"cmd": "command", "super": "win", "meta": "win", "windows": "win", "control": "ctrl",
+                "return": "enter", "esc": "escape", "del": "delete", "pgup": "pageup", "pgdn": "pagedown",
+                "arrowup": "up", "arrowdown": "down", "arrowleft": "left", "arrowright": "right",
+                "option": "alt", "opt": "alt", "spacebar": "space", "bksp": "backspace", "ins": "insert"}
+
+
+def _norm_keys(keys):
+    if isinstance(keys, (list, tuple)):
+        parts = [str(k) for k in keys]
+    else:
+        parts = re.split(r"\s*\+\s*", str(keys or "").strip())
+    out = []
+    for p in parts:
+        k = p.strip().lower()
+        if not k:
+            continue
+        k = _KEY_ALIASES.get(k, k)
+        if k == "win" and sys.platform == "darwin":
+            k = "command"
+        elif k == "command" and sys.platform != "darwin":
+            k = "ctrl"                     # "cmd+c" means ctrl+c off a Mac
+        out.append(k)
+    return out
+
+
+def _cu_type(pg, text):
+    if not text:
+        return
+    if all(32 <= ord(c) < 127 or c in "\n\t" for c in text) and len(text) <= 400:
+        pg.write(text, interval=0.006)
+        return
+    try:                                   # unicode / long text: paste it
+        import pyperclip
+        prev = None
+        try:
+            prev = pyperclip.paste()
+        except Exception:
+            pass
+        pyperclip.copy(text)
+        pg.hotkey("command" if sys.platform == "darwin" else "ctrl", "v")
+        time.sleep(0.25)
+        if prev is not None:
+            pyperclip.copy(prev)
+    except Exception:
+        pg.write(text, interval=0.006)
+
+
+def _self_window(action):
+    """Minimize / restore the Spark X window so it isn't in the way while
+    the model uses the computer."""
+    w = _WEBVIEW.get("window")
+    try:
+        if w is not None:
+            getattr(w, action)()
+            return True
+        if os.name == "nt":
+            import pygetwindow as gw
+            wins = [x for x in gw.getWindowsWithTitle(APP_UI) if x.title.strip() == APP_UI]
+            for x in wins:
+                x.minimize() if action == "minimize" else x.restore()
+            return bool(wins)
+    except Exception:
+        pass
+    return False
+
+
+_CU_READONLY = ("screenshot", "cursor_position", "wait")
+
+
+def _t_computer(a, cwd=None):
+    act = str(a.get("action") or "screenshot").strip().lower().replace(" ", "_").replace("-", "_")
+    act = {"left_click": "click", "screen": "screenshot", "mouse_move": "move", "press": "key",
+           "hotkey": "key", "write": "type", "sleep": "wait"}.get(act, act)
+    if act == "screenshot":
+        path, tw, th = _cu_capture()
+        return {"text": f"Screenshot {tw}×{th}. Use coordinates in this image.", "image": path}
+    pg = _pyautogui()
+    if pg is None:
+        return {"text": "[computer use needs pyautogui, mss and pillow: Settings → Computer use]"}
+    with _CU_STATE["lock"]:
+        if act in ("click", "double_click", "right_click", "middle_click", "triple_click"):
+            x, y = _cu_point(a)
+            button = {"right_click": "right", "middle_click": "middle"}.get(act, a.get("button", "left"))
+            clicks = {"double_click": 2, "triple_click": 3}.get(act, int(a.get("clicks", 1) or 1))
+            pg.click(x, y, clicks=clicks, interval=0.08, button=button)
+            did = f"{act.replace('_', ' ')} at ({a.get('x')}, {a.get('y')})"
+        elif act == "move":
+            x, y = _cu_point(a)
+            pg.moveTo(x, y, duration=0.15)
+            did = f"moved to ({a.get('x')}, {a.get('y')})"
+        elif act == "drag":
+            x, y = _cu_point(a)
+            x2, y2 = _cu_point(a, "to_x", "to_y")
+            pg.moveTo(x, y, duration=0.1)
+            pg.dragTo(x2, y2, duration=0.45, button=a.get("button", "left"))
+            did = f"dragged to ({a.get('to_x')}, {a.get('to_y')})"
+        elif act == "scroll":
+            if a.get("x") is not None and a.get("y") is not None:
+                pg.moveTo(*_cu_point(a), duration=0.1)
+            n = int(a.get("amount", 5) or 5)
+            direction = str(a.get("direction", "down")).lower()
+            if direction in ("left", "right"):
+                pg.hscroll(n * (1 if direction == "right" else -1) * (1 if sys.platform == "darwin" else 60))
+            else:
+                pg.scroll(n * (1 if direction == "up" else -1) * (1 if sys.platform == "darwin" else 60))
+            did = f"scrolled {direction} {n}"
+        elif act == "type":
+            text = str(a.get("text", ""))
+            _cu_type(pg, text)
+            did = f"typed {len(text)} characters"
+        elif act == "key":
+            keys = _norm_keys(a.get("keys") or a.get("key") or a.get("text"))
+            if not keys:
+                return {"text": "[key: give keys, e.g. 'enter' or 'ctrl+s']"}
+            pg.hotkey(*keys) if len(keys) > 1 else pg.press(keys[0])
+            did = "pressed " + "+".join(keys)
+        elif act == "wait":
+            secs = min(max(float(a.get("seconds", 1) or 1), 0.1), 30)
+            time.sleep(secs)
+            did = f"waited {secs:g}s"
+        elif act == "cursor_position":
+            if _CU_STATE["geom"] is None:
+                _cu_capture()
+            tw, th, lw, lh = _CU_STATE["geom"]
+            cx, cy = pg.position()
+            return {"text": f"mouse at ({round(cx * tw / lw)}, {round(cy * th / lh)}) in screenshot pixels"}
+        else:
+            return {"text": f"[unknown action '{act}'. Use screenshot, click, double_click, right_click, "
+                            "move, drag, scroll, type, key, wait]"}
+    if a.get("screenshot", True) is False:
+        return {"text": did}
+    time.sleep(float(_pref("computer_settle", 0.6) or 0.6))
+    path, tw, th = _cu_capture()
+    return {"text": did + f". New screenshot {tw}×{th} attached.", "image": path}
+
+
+def _t_open(a, cwd=None):
+    """Open a file, folder, URL or app with the system's default handler."""
+    target = str(a.get("target") or a.get("path") or a.get("url") or a.get("app") or "").strip()
+    if not target:
+        return "[open: give a file, folder, URL or app name]"
+    if target.lower() in ("blender", "blender.exe") and _blender_bin():
+        subprocess.Popen([_blender_bin()], **_detached())
+        return "opened Blender"
+    p = Path(target).expanduser()
+    if cwd and not p.is_absolute() and (Path(cwd) / p).exists():
+        p = Path(cwd) / p
+    is_url = bool(re.match(r"^[a-z][a-z0-9+.-]*:", target, re.I)) and not re.match(r"^[a-z]:[\\/]", target, re.I)
+    try:
+        if os.name == "nt":
+            if p.exists() or is_url:
+                os.startfile(str(p) if p.exists() else target)
+            else:
+                subprocess.Popen(["cmd", "/c", "start", "", target], **_detached())
+        elif sys.platform == "darwin":
+            if p.exists() or is_url:
+                subprocess.Popen(["open", str(p) if p.exists() else target])
+            else:
+                subprocess.Popen(["open", "-a", target])
+        else:
+            if p.exists() or is_url:
+                subprocess.Popen(["xdg-open", str(p) if p.exists() else target], **_detached())
+            else:
+                exe = shutil.which(target)
+                if not exe:
+                    return f"[open: no app called '{target}' on PATH]"
+                subprocess.Popen([exe], **_detached())
+        return f"opened {target}"
+    except Exception as e:
+        return f"[open failed: {e}]"
+
+
+def _detached():
+    if os.name == "nt":
+        return {"creationflags": 0x00000008 | 0x00000200, "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    return {"start_new_session": True, "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+
+
+# ══ Spark X: Blender ═════════════════════════════════════════════════════════
+BLENDER_PRELUDE = r'''
+import bpy, bmesh, math, os, sys
+import mathutils
+from mathutils import Vector, Euler, Matrix
+OUT = os.environ.get("SPARKX_OUT") or os.getcwd()
+os.makedirs(OUT, exist_ok=True)
+_SPARKX = {"saved": None, "images": []}
+
+def clear_scene():
+    """Delete every object (and orphaned meshes, materials, lights, cameras)."""
+    for o in list(bpy.data.objects):
+        bpy.data.objects.remove(o, do_unlink=True)
+    for coll in (bpy.data.meshes, bpy.data.materials, bpy.data.lights, bpy.data.cameras, bpy.data.curves):
+        for block in list(coll):
+            if block.users == 0:
+                coll.remove(block)
+
+def material(name, color=(0.8, 0.8, 0.8), metallic=0.0, roughness=0.5, emission=None, strength=1.0):
+    """A Principled BSDF material (reused if the name exists)."""
+    m = bpy.data.materials.get(name) or bpy.data.materials.new(name)
+    if getattr(m, "node_tree", None) is None:        # Blender 5 materials have nodes already
+        m.use_nodes = True
+    b = m.node_tree.nodes.get("Principled BSDF")
+    color = tuple(color) + ((1.0,) if len(color) == 3 else ())
+    if b:
+        b.inputs["Base Color"].default_value = color
+        b.inputs["Metallic"].default_value = metallic
+        b.inputs["Roughness"].default_value = roughness
+        if emission is not None:
+            e = tuple(emission) + ((1.0,) if len(emission) == 3 else ())
+            b.inputs["Emission Color" if "Emission Color" in b.inputs else "Emission"].default_value = e
+            if "Emission Strength" in b.inputs:
+                b.inputs["Emission Strength"].default_value = strength
+    m.diffuse_color = color
+    return m
+
+def assign(obj, mat):
+    """Give obj the material mat (replacing its first slot)."""
+    if obj.data.materials:
+        obj.data.materials[0] = mat
+    else:
+        obj.data.materials.append(mat)
+    return obj
+
+def look_at(obj, target=(0, 0, 0)):
+    obj.rotation_euler = (Vector(target) - obj.location).to_track_quat("-Z", "Y").to_euler()
+
+def _link(obj):
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+def add_camera(location=(7.5, -7.5, 5.5), target=(0, 0, 0.5), lens=50):
+    cam = _link(bpy.data.objects.new("Camera", bpy.data.cameras.new("Camera")))
+    cam.data.lens = lens
+    cam.location = location
+    look_at(cam, target)
+    bpy.context.scene.camera = cam
+    return cam
+
+def add_sun(strength=3.0, rotation=(math.radians(50), 0, math.radians(30))):
+    sun = _link(bpy.data.objects.new("Sun", bpy.data.lights.new("Sun", "SUN")))
+    sun.data.energy = strength
+    sun.rotation_euler = rotation
+    return sun
+
+def add_area_light(location=(4, -4, 6), size=5.0, power=800.0, target=(0, 0, 0)):
+    lamp = _link(bpy.data.objects.new("Area", bpy.data.lights.new("Area", "AREA")))
+    lamp.data.size, lamp.data.energy = size, power
+    lamp.location = location
+    look_at(lamp, target)
+    return lamp
+
+def _engine_id(name):
+    items = bpy.types.RenderSettings.bl_rna.properties["engine"].enum_items.keys()
+    name = (name or "EEVEE").upper()
+    if name.startswith("EEVEE"):
+        for cand in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE"):
+            if cand in items:
+                return cand
+    if name.startswith("WORK"):
+        return "BLENDER_WORKBENCH"
+    return "CYCLES"
+
+def render(path=None, engine="EEVEE", samples=64, size=(1280, 720)):
+    """Render the scene camera to a PNG (Spark X switches to Cycles on
+    machines where EEVEE can't run headless). Spark X shows the image and the
+    model can look at it."""
+    engine = os.environ.get("SPARKX_ENGINE") or engine
+    sc = bpy.context.scene
+    if sc.camera is None:
+        add_camera()
+    sc.render.resolution_x, sc.render.resolution_y = int(size[0]), int(size[1])
+    sc.render.resolution_percentage = 100
+    sc.render.image_settings.file_format = "PNG"
+    path = os.path.abspath(path or os.path.join(OUT, "render_%d.png" % (len(_SPARKX["images"]) + 1)))
+    sc.render.filepath = path
+    engines = [_engine_id(engine)] + (["CYCLES"] if _engine_id(engine) != "CYCLES" else [])
+    for eng in engines:
+        try:
+            sc.render.engine = eng
+            if eng == "CYCLES":
+                sc.cycles.samples = int(samples)
+                sc.cycles.use_denoising = True
+            elif "EEVEE" in eng:
+                try:
+                    sc.eevee.taa_render_samples = int(samples)
+                except Exception:
+                    pass
+            bpy.ops.render.render(write_still=True)
+            break
+        except Exception as e:
+            print("SPARKX_WARN: %s render failed: %s" % (eng, e))
+            if eng == engines[-1]:
+                raise
+    _SPARKX["images"].append(path)
+    print("SPARKX_IMAGE:" + path)
+    return path
+
+def save(path=None):
+    """Save the scene as a .blend file."""
+    path = os.path.abspath(path or os.environ.get("SPARKX_SAVE") or os.path.join(OUT, "scene.blend"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    bpy.ops.wm.save_as_mainfile(filepath=path)
+    _SPARKX["saved"] = path
+    print("SPARKX_SAVED:" + path)
+    return path
+'''
+
+BLENDER_EPILOGUE = r'''
+if os.environ.get("SPARKX_SAVE") and not _SPARKX["saved"]:
+    save()
+'''
+
+BLENDER_TOOL_DESC = (
+    "Make and edit 3D scenes in Blender with Python (bpy). action 'run' executes code in a "
+    "background Blender and returns its output plus any rendered image; action 'live' runs code "
+    "inside the Blender window the user has open (needs the Spark X bridge add-on — see 'status'); "
+    "'open' opens a .blend in Blender; 'install_bridge' installs the bridge add-on. Helpers "
+    "available in 'run': clear_scene(), material(name, color, metallic, roughness, emission, "
+    "strength), assign(obj, mat), add_camera(location, target, lens), add_sun(strength, rotation), "
+    "add_area_light(location, size, power, target), look_at(obj, target), render(path=None, "
+    "engine='EEVEE', samples=64, size=(1280, 720)) and save(path=None); OUT is an output folder. "
+    "Build scenes with bpy.ops/bpy.data, call render() to check your work, look at the render and "
+    "iterate, then save().")
+
+
+def _blender_bin():
+    cfg = os.environ.get("BLENDER_PATH") or _pref("blender_path")
+    if cfg and Path(cfg).is_file():
+        return str(cfg)
+    w = shutil.which("blender")
+    if w:
+        return w
+    cands = []
+    if os.name == "nt":
+        for base in (os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("ProgramFiles(x86)", "")):
+            if base:
+                cands += sorted(Path(base, "Blender Foundation").glob("Blender*/blender.exe"),
+                                key=lambda p: [int(x) if x.isdigit() else 0 for x in re.findall(r"\d+", p.parent.name)],
+                                reverse=True)
+        cands.append(Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                          "Steam", "steamapps", "common", "Blender", "blender.exe"))
+    elif sys.platform == "darwin":
+        cands += [Path("/Applications/Blender.app/Contents/MacOS/Blender"),
+                  Path.home() / "Applications/Blender.app/Contents/MacOS/Blender"]
+    else:
+        cands += [Path("/snap/bin/blender"), Path("/usr/bin/blender"), Path("/usr/local/bin/blender")]
+        cands += sorted(Path.home().glob("blender*/blender"), reverse=True)
+        cands += sorted(Path("/opt").glob("blender*/blender"), reverse=True)
+    for c in cands:
+        if c.is_file():
+            return str(c)
+    return None
+
+
+_BLENDER_VER = {}
+
+def _blender_version(exe):
+    if exe in _BLENDER_VER:
+        return _BLENDER_VER[exe]
+    ver = ""
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30,
+                             errors="replace").stdout
+        m = re.search(r"Blender\s+([\d.]+[^\n]*)", out)
+        ver = m.group(1).strip() if m else ""
+    except Exception:
+        pass
+    _BLENDER_VER[exe] = ver
+    return ver
+
+
+def _bridge_file():
+    return Path.home() / ".sparkx" / "blender-bridge.json"
+
+
+def _bridge_info():
+    info = jload(_bridge_file(), None)
+    if not info or not info.get("port") or not info.get("token"):
+        return None
+    return info
+
+
+def _bridge_call(code, screenshot=False, timeout=180):
+    info = _bridge_info()
+    if not info:
+        raise RuntimeError("Blender isn't connected. Open Blender with the Spark X bridge add-on enabled "
+                           "(blender action 'install_bridge'), then try again.")
+    import socket as _sock
+    try:
+        s = _sock.create_connection(("127.0.0.1", int(info["port"])), timeout=4)
+    except OSError:
+        raise RuntimeError("Blender isn't running (or the Spark X bridge add-on is disabled).")
+    with s:
+        s.settimeout(timeout)
+        s.sendall((json.dumps({"token": info["token"], "code": code, "screenshot": bool(screenshot),
+                               "timeout": timeout}) + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    return json.loads(buf.decode("utf-8", "replace") or "{}")
+
+
+def _bridge_up():
+    info = _bridge_info()
+    if not info:
+        return False
+    try:
+        import socket as _sock
+        with _sock.create_connection(("127.0.0.1", int(info["port"])), timeout=0.6):
+            return True
+    except OSError:
+        return False
+
+
+def _bridge_addon_path():
+    base = _studio_static_dir()
+    p = (base.parent / "blender" / "spark_x_bridge.py") if base else None
+    return p if p and p.is_file() else None
+
+
+def _blender_status():
+    exe = _blender_bin()
+    info = _bridge_info() or {}
+    return {"found": bool(exe), "path": exe or "", "version": _blender_version(exe) if exe else "",
+            "bridge": {"connected": _bridge_up(), "blender": info.get("blender", ""), "port": info.get("port")},
+            "addon": str(_bridge_addon_path() or "")}
+
+
+def _blender_run(code, blend_file=None, save_as=None, timeout=600):
+    exe = _blender_bin()
+    if not exe:
+        return {"text": "[Blender isn't installed (or not found). Install it from blender.org, or set its "
+                        "path in Settings → Computer use.]"}
+    job = APP_D / "blender" / time.strftime("%Y%m%d-%H%M%S")
+    job.mkdir(parents=True, exist_ok=True)
+    script = job / "script.py"
+    script.write_text(BLENDER_PRELUDE + "\n# ── model code ──\n" + str(code) + "\n" + BLENDER_EPILOGUE,
+                      encoding="utf-8")
+    argv = [exe, "--background"]
+    if blend_file:
+        bf = Path(blend_file).expanduser()
+        if not bf.is_file():
+            return {"text": f"[no such .blend file: {bf}]"}
+        argv.append(str(bf))
+    else:
+        argv.append("--factory-startup")
+    argv += ["-noaudio", "--python-exit-code", "1", "--python", str(script)]
+    env = dict(os.environ, SPARKX_OUT=str(job), SPARKX_SAVE=str(save_as or ""), PYTHONIOENCODING="utf-8")
+    headless_linux = sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if headless_linux:
+        env["SPARKX_ENGINE"] = "CYCLES"          # EEVEE needs a GPU context
+    note = ""
+    for attempt in (1, 2):
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env,
+                               cwd=str(job), errors="replace")
+        except subprocess.TimeoutExpired:
+            return {"text": f"[Blender didn't finish within {timeout}s]"}
+        out = (r.stdout or "") + (r.stderr or "")
+        # EEVEE without a usable GPU context aborts Blender outright (no Python
+        # error to catch), so run the script again rendering with Cycles.
+        if (attempt == 1 and r.returncode != 0 and "SPARKX_IMAGE:" not in out and "render(" in str(code)
+                and env.get("SPARKX_ENGINE") != "CYCLES"
+                and re.search(r"EGL|OpenGL|GLX|GPU|gpu backend|Vulkan|Metal", out, re.I)):
+            env["SPARKX_ENGINE"] = "CYCLES"
+            note = "EEVEE isn't available here, so this was rendered with Cycles."
+            continue
+        break
+    images = re.findall(r"^SPARKX_IMAGE:(.+)$", out, re.M)
+    saved = re.findall(r"^SPARKX_SAVED:(.+)$", out, re.M)
+    noise = re.compile(r"^(Fra:\d+|Blender \d|Read prefs|Warning: .*(fontconfig|egl)|Color management|"
+                       r"SPARKX_(IMAGE|SAVED):|\s*$|Saved \"|Time: \d|Blender quit)")
+    lines = [ln for ln in out.splitlines() if not noise.match(ln)]
+    parts = [f"Blender exited with code {r.returncode}."] + ([note] if note else [])
+    if saved:
+        parts.append("Saved: " + saved[-1].strip())
+    if images:
+        parts.append("Rendered: " + ", ".join(i.strip() for i in images))
+    parts.append("Output folder: " + str(job))
+    if lines:
+        parts.append("Log:\n" + "\n".join(lines[-40:]))
+    return {"text": "\n".join(parts)[:MAX_TOOL_OUTPUT],
+            "image": images[-1].strip() if images and Path(images[-1].strip()).is_file() else None}
+
+
+def _blender_install_bridge():
+    exe = _blender_bin()
+    src = _bridge_addon_path()
+    if not exe:
+        raise RuntimeError("Blender wasn't found")
+    if not src:
+        raise RuntimeError("the bridge add-on file is missing from this build")
+    expr = ("import bpy\n"
+            "try:\n"
+            f"    bpy.ops.preferences.addon_install(filepath={str(src)!r}, overwrite=True)\n"
+            "    bpy.ops.preferences.addon_enable(module='spark_x_bridge')\n"
+            "    bpy.ops.wm.save_userpref()\n"
+            "    print('SPARKX_OK')\n"
+            "except Exception as e:\n"
+            "    print('SPARKX_FAIL', e)\n")
+    r = subprocess.run([exe, "--background", "-noaudio", "--python-expr", expr], capture_output=True,
+                       text=True, timeout=180, errors="replace")
+    out = (r.stdout or "") + (r.stderr or "")
+    if "SPARKX_OK" not in out:
+        m = re.search(r"SPARKX_FAIL (.+)", out)
+        raise RuntimeError(m.group(1) if m else (out.strip().splitlines() or ["install failed"])[-1])
+    return "Installed and enabled the Spark X bridge. Restart Blender (or open it) and it connects automatically."
+
+
+def _t_blender(a, cwd=None):
+    act = str(a.get("action") or "run").lower()
+    if act == "status":
+        st = _blender_status()
+        if not st["found"]:
+            return "Blender isn't installed or wasn't found. Get it from https://www.blender.org/download/"
+        b = st["bridge"]
+        return (f"Blender {st['version'] or ''} at {st['path']}. Live bridge: "
+                + ("connected" + (f" (Blender {b['blender']})" if b.get("blender") else "")
+                   if b["connected"] else "not connected — open Blender with the Spark X bridge add-on "
+                                         "(action 'install_bridge' installs it)."))
+    if act == "run":
+        code = a.get("code") or ""
+        if not code.strip():
+            return "[blender run: give Python code]"
+        return _blender_run(code, a.get("blend_file"), a.get("save_as"),
+                            timeout=int(a.get("timeout", 600) or 600))
+    if act == "live":
+        res = _bridge_call(a.get("code") or "", screenshot=bool(a.get("screenshot", True)))
+        txt = ("ok" if res.get("ok") else "error") + "\n" + (res.get("output") or "")
+        if res.get("result"):
+            txt += "\nresult: " + str(res["result"])
+        if res.get("error"):
+            txt += "\n" + str(res["error"])
+        img = res.get("image")
+        return {"text": txt[:MAX_TOOL_OUTPUT], "image": img if img and Path(img).is_file() else None}
+    if act == "open":
+        exe = _blender_bin()
+        if not exe:
+            return "[Blender wasn't found]"
+        target = a.get("path") or a.get("blend_file") or ""
+        subprocess.Popen([exe] + ([str(Path(target).expanduser())] if target else []), **_detached())
+        return "opened Blender" + (f" with {target}" if target else "")
+    if act == "install_bridge":
+        return _blender_install_bridge()
+    return f"[unknown blender action '{act}': use run, live, status, open or install_bridge]"
+
+
+TOOLS_IMPL.update({"computer": _t_computer, "open": _t_open, "blender": _t_blender})
+
+
+# ── tool schemas for native function calling ─────────────────────────────────
+def _obj(props, required=()):
+    return {"type": "object", "properties": props, "required": list(required)}
+
+def _s(desc):
+    return {"type": "string", "description": desc}
+
+def _i(desc):
+    return {"type": "integer", "description": desc}
+
+
+_SHELL_NAME = "cmd.exe" if os.name == "nt" else ("zsh/bash" if sys.platform == "darwin" else "bash")
+
+STUDIO_TOOLS = {
+    "bash": (f"Run a shell command ({_SHELL_NAME}) in the working folder; returns output and exit code.",
+             _obj({"cmd": _s("The command to run")}, ["cmd"])),
+    "read": ("Read a text file (numbered chunk).",
+             _obj({"path": _s("File path"), "offset": _i("First line, 0-based"), "limit": _i("Max lines (default 200)")}, ["path"])),
+    "write": ("Create or overwrite a file with the given content.",
+              _obj({"path": _s("File path"), "content": _s("Full file content")}, ["path", "content"])),
+    "edit": ("Replace exact text in a file (read it first).",
+             _obj({"path": _s("File path"), "old": _s("Exact text to replace"), "new": _s("Replacement text"),
+                   "all": {"type": "boolean", "description": "Replace every occurrence"}}, ["path", "old", "new"])),
+    "ls": ("List a directory.", _obj({"path": _s("Directory (default: working folder)")})),
+    "glob": ("Find files matching a glob pattern.", _obj({"pattern": _s("e.g. **/*.py"), "root": _s("Folder to search")}, ["pattern"])),
+    "grep": ("Search file contents with a regular expression.",
+             _obj({"pattern": _s("Regex"), "root": _s("Folder"), "glob": _s("File glob, e.g. **/*.js")}, ["pattern"])),
+    "python": ("Run a Python snippet and return what it prints.", _obj({"code": _s("Python code")}, ["code"])),
+    "browse": ("Open a web page and return its readable text.", _obj({"url": _s("URL")}, ["url"])),
+    "download": ("Download a URL to a file.", _obj({"url": _s("URL"), "path": _s("Where to save it")}, ["url", "path"])),
+    "computer": (
+        "Use the computer like a person: see the screen and control the mouse and keyboard. Start with "
+        "action 'screenshot'. x/y are pixels in the most recent screenshot. After each action you get a "
+        "fresh screenshot to check the result.",
+        _obj({"action": {"type": "string", "enum": ["screenshot", "click", "double_click", "right_click",
+                                                    "middle_click", "move", "drag", "scroll", "type", "key",
+                                                    "wait", "cursor_position"]},
+              "x": _i("x in screenshot pixels"), "y": _i("y in screenshot pixels"),
+              "to_x": _i("drag end x"), "to_y": _i("drag end y"),
+              "text": _s("text to type"), "keys": _s("key or combination, e.g. 'enter', 'ctrl+s', 'cmd+space'"),
+              "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+              "amount": _i("scroll steps (default 5)"), "seconds": {"type": "number", "description": "seconds to wait"}},
+             ["action"])),
+    "open": ("Open a file, folder, URL or application (e.g. 'blender', 'notepad', 'Safari', 'https://…').",
+             _obj({"target": _s("Path, URL or app name")}, ["target"])),
+    "blender": (BLENDER_TOOL_DESC,
+                _obj({"action": {"type": "string", "enum": ["run", "live", "status", "open", "install_bridge"]},
+                      "code": _s("Python (bpy) code for 'run' or 'live'"),
+                      "blend_file": _s("Optional .blend to open before 'run'"),
+                      "save_as": _s("Optional .blend path to save to after 'run'"),
+                      "path": _s(".blend file for 'open'"),
+                      "screenshot": {"type": "boolean", "description": "'live': also return a viewport screenshot"}},
+                     ["action"])),
+}
+
+
+def _tool_schemas(names, mcp_tools):
+    """OpenAI `tools` for the enabled tools, plus a name map back to ours."""
+    tools, name_map = [], {}
+    for n in names:
+        if n in STUDIO_TOOLS:
+            desc, params = STUDIO_TOOLS[n]
+            tools.append({"type": "function", "function": {"name": n, "description": desc, "parameters": params}})
+            name_map[n] = n
+    for t in mcp_tools:
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", t["qualified"])[:64]
+        schema = t.get("schema") or {"type": "object", "properties": {}}
+        if schema.get("type") != "object":
+            schema = {"type": "object", "properties": {}}
+        tools.append({"type": "function", "function": {"name": safe,
+                                                       "description": (t.get("description") or t["name"])[:1000],
+                                                       "parameters": schema}})
+        name_map[safe] = t["qualified"]
+    return tools, name_map
+
+
+def _data_url(path):
+    p = Path(path)
+    mime = "image/jpeg" if p.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+    return f"data:{mime};base64," + base64.b64encode(p.read_bytes()).decode()
+
+
+_SHOT_MARK = "Current screen (after your last action):"
+
+
+def _drop_old_images(msgs, keep=1):
+    """Keep only the newest `keep` screenshots in the conversation sent to the
+    model: they are large and older ones are no longer useful. Images the
+    user attached are never touched."""
+    seen = 0
+    for m in reversed(msgs):
+        c = m.get("content")
+        if m.get("role") != "user" or not isinstance(c, list) or not c:
+            continue
+        first = c[0]
+        if not (first.get("type") == "text" and str(first.get("text", "")).startswith(_SHOT_MARK)):
+            continue
+        parts = []
+        for part in c:
+            if part.get("type") == "image_url":
+                seen += 1
+                if seen > keep:
+                    part = {"type": "text", "text": "[earlier screenshot omitted]"}
+            parts.append(part)
+        m["content"] = parts
+
+
 # ── the agentic chat stream ──────────────────────────────────────────────────
 def _demo_reply(messages):
     last = ""
@@ -4495,14 +5977,14 @@ def _demo_reply(messages):
         return ("Here's a small page to show how **artifacts** work. It opens in the panel on "
                 "the right, where you can switch between the live preview and the code.\n\n"
                 "```html\n<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
-                "<title>Hello from CS</title>\n<style>\n  body { margin: 0; min-height: 100vh; "
+                "<title>Hello from Spark X</title>\n<style>\n  body { margin: 0; min-height: 100vh; "
                 "display: grid; place-items: center;\n         background: #1f1e1c; color: #ecebe6; "
                 "font: 16px Georgia, serif; }\n  .card { padding: 40px 48px; border: 1px solid "
                 "#3a3833; border-radius: 16px; text-align: center; }\n  h1 { font-weight: 400; "
                 "margin: 0 0 8px; }\n  button { margin-top: 20px; padding: 10px 18px; border: 0; "
                 "border-radius: 10px;\n           background: #c9794f; color: #fff; font: 600 14px "
                 "system-ui; cursor: pointer; }\n</style>\n</head>\n<body>\n  <div class=\"card\">\n"
-                "    <h1>Hello from CS</h1>\n    <p>Built by the demo model.</p>\n"
+                "    <h1>Hello from Spark X</h1>\n    <p>Built by the demo model.</p>\n"
                 "    <button onclick=\"this.textContent='Clicked'\">Click me</button>\n  </div>\n"
                 "</body>\n</html>\n```\n\nThis is the built-in demo, so it can't really reason. "
                 "Connect a free provider in **Settings → Providers** or set up a local model to "
@@ -4513,12 +5995,13 @@ def _demo_reply(messages):
                 "        a, b = b, a + b\n    return out\n\nprint(fib(10))\n```\n\n"
                 "For real coding help, open **Code** in the sidebar and set up a local coding "
                 "model, or connect a free cloud provider.")
-    return ("I'm **CS Echo**, the built-in demo model — I don't run a neural network, so I can "
+    return ("I'm **Spark Echo**, the built-in demo model — I don't run a neural network, so I can "
             "only echo. You said:\n\n> " + (last.replace("\n", "\n> ") or "…") + "\n\n"
             "To get real answers:\n\n"
-            "- **Free cloud models** — Settings → Providers. Groq, Google Gemini and OpenRouter "
-            "all have free tiers; paste a key and every model shows up in the model menu.\n"
-            "- **Local models** — Code → *Set up local coder*, or `cs pull <hf-repo>`.\n"
+            "- **Free model, no signup** — pick *Free model* in the model menu (or Settings → "
+            "Providers). Groq, Google Gemini and OpenRouter also have free tiers with a key.\n"
+            "- **Local models** — Settings → Models suggests models for your computer and "
+            "installs them with Ollama.\n"
             "- **Ollama / LM Studio** — detected automatically when running.")
 
 def _demo_stream(messages):
@@ -4561,11 +6044,20 @@ def _prep_history(msgs, vision):
     return hist
 
 
-def _studio_system(ctx, tools, mcp_tools, cwd, mode):
+def _tool_args_hint(params):
+    out = []
+    for k, v in (params.get("properties") or {}).items():
+        t = "|".join(v["enum"]) if v.get("enum") else {"integer": "int", "number": "num", "boolean": "bool"}.get(v.get("type"), "str")
+        out.append(f"{k}:{t}")
+    return "{" + ", ".join(out) + "}"
+
+
+def _studio_system(ctx, tools, mcp_tools, cwd, mode, native=False, vision=False):
     now = _dt.datetime.now().strftime("%A, %d %B %Y")
+    os_name = {"win32": "Windows", "darwin": "macOS"}.get(sys.platform, "Linux")
     base = (ctx.get("system") or "").strip()
-    parts = [f"You are CS, a capable, precise assistant running on {CS_USER}'s computer "
-             f"through CS Framework. Today is {now}."]
+    parts = [f"You are {APP_UI}, a capable, precise assistant running on {CS_USER}'s {os_name} "
+             f"computer. Today is {now}."]
     if base and base != DEFAULT_CONTEXT.get("system"):
         parts.append(base)
     if CFG.get("prefs", {}).get("artifacts", True):
@@ -4573,14 +6065,28 @@ def _studio_system(ctx, tools, mcp_tools, cwd, mode):
                      "program, put it in one fenced code block tagged with its language "
                      "(```html, ```svg, ```python …). Web pages must be complete HTML documents.")
     if mode == "code":
-        parts.append(f"You are working in the project folder {cwd}. Explore with ls/tree/grep "
+        parts.append(f"You are working in the project folder {cwd}. Explore with ls/glob/grep "
                      "and read files before changing them. Prefer 'edit' for small changes. "
                      "Keep explanations short.")
-    if tools or mcp_tools:
-        desc = {t["name"]: t.get("desc", "") for t in TOOLS_SPEC}
-        desc.update({"edit": '{"path":str,"old":str,"new":str,"all":bool?} — replace exact text in a file',
-                     "browse": '{"url":str} — open a web page and return its readable text'})
-        lines = [f"- {n}: {desc.get(n, '')}" for n in tools if n in TOOLS_IMPL]
+    if "computer" in tools:
+        parts.append("You can operate this computer. The `computer` tool shows you the screen and "
+                     "controls the mouse and keyboard, `open` launches apps, files and URLs, and "
+                     "`bash` runs commands. Take a screenshot first, work one step at a time and check "
+                     "each new screenshot before the next step. Prefer keyboard shortcuts, `open` and "
+                     "`bash` over hunting for buttons. Ask the user before anything destructive or "
+                     "irreversible (deleting files, sending messages, payments).")
+        if not vision:
+            parts.append("This model can't see images, so screenshots won't help: rely on `open`, "
+                         "`bash` and keyboard shortcuts.")
+    if "blender" in tools:
+        parts.append("For 3D work use the `blender` tool with Python (bpy) rather than clicking "
+                     "through Blender's interface: build the scene in code, call render() and look at "
+                     "the image, refine it, then save() a .blend. If the user has Blender open with "
+                     "the Spark X bridge, use action 'live' to build directly in their scene. Target "
+                     "Blender 4.x/5.x APIs.")
+    if (tools or mcp_tools) and not native:
+        lines = [f"- {n}: {STUDIO_TOOLS[n][0]} args={_tool_args_hint(STUDIO_TOOLS[n][1])}"
+                 for n in tools if n in STUDIO_TOOLS]
         for t in mcp_tools:
             props = json.dumps((t.get("schema") or {}).get("properties", {}))[:400]
             lines.append(f"- {t['qualified']}: {t.get('description', '')[:300]} args={props}")
@@ -4596,13 +6102,22 @@ class _Cancelled(Exception):
     pass
 
 
+def _needs_approval(name, args, is_mcp):
+    if is_mcp:
+        return True
+    if name == "computer":
+        return str(args.get("action", "screenshot")).lower() not in _CU_READONLY
+    if name == "blender":
+        return str(args.get("action", "run")).lower() != "status"
+    return name in _APPROVAL_TOOLS
+
+
 def _studio_run_tool(name, args, cwd, enabled, mcp_tools, allowed_always, send, state):
     mcp = next((t for t in mcp_tools if t["qualified"] == name or t["name"] == name), None)
     if not mcp and name not in enabled:
         return f"[tool '{name}' is not enabled]", None
-    needs = ((mcp is not None or name in _APPROVAL_TOOLS)
-             and CFG.get("prefs", {}).get("tool_approval", "ask") == "ask"
-             and name not in allowed_always)
+    ask = CFG.get("prefs", {}).get("tool_approval", "ask") == "ask"
+    needs = ask and _needs_approval(name, args, mcp is not None) and name not in allowed_always
     if needs:
         aid = uuid.uuid4().hex[:10]
         ev = threading.Event()
@@ -4620,18 +6135,32 @@ def _studio_run_tool(name, args, cwd, enabled, mcp_tools, allowed_always, send, 
             return "[the user declined this tool call]", None
         if info.get("always"):
             allowed_always.add(name)
+    # get Spark X out of the way once the model may act freely on the screen
+    if (name == "computer" and _pref("computer_minimize", True) and not state.get("minimized")
+            and (not ask or name in allowed_always)):
+        state["minimized"] = _self_window("minimize")
+        if state["minimized"]:
+            time.sleep(0.45)
     try:
         if mcp:
             srv = next((s for s in _mcp_cfg_load().get("servers", []) if s.get("id") == mcp["server"]), None)
             if not srv:
                 return "[MCP server no longer configured]", None
             return _mcp_get_client(srv).call_tool(mcp["name"], args), None
-        out = str(TOOLS_IMPL[name](args, cwd=cwd))
+        out = TOOLS_IMPL[name](args, cwd=cwd)
     except Exception as e:
+        if type(e).__name__ == "FailSafeException":        # mouse slammed into a screen corner
+            state["cancel"] = True
+            send({"type": "token", "text": "\n\nStopped: you moved the mouse into a corner of the screen."})
+            raise _Cancelled() from e
         return f"[tool error: {e}]", None
+    if isinstance(out, dict):
+        img = out.get("image")
+        return str(out.get("text", "")), (img if img and Path(img).is_file() else None)
+    out = str(out)
     image = None
     if name == "screen":
-        m = re.search(r"screenshot:\s*(\S+\.png)", out)
+        m = re.search(r"screenshot:\s*(\S+\.(?:png|jpg))", out)
         if m and Path(m.group(1)).is_file():
             image = m.group(1)
     return out, image
@@ -4640,6 +6169,145 @@ def _studio_run_tool(name, args, cwd, enabled, mcp_tools, allowed_always, send, 
 def _file_token_url(path):
     tok, _ = _studio_tokens()
     return "/api/file?path=" + urllib.parse.quote(str(path)) + "&t=" + tok
+
+
+_NO_NATIVE = set()
+
+def _rec_key(rec):
+    return rec.name
+
+
+def _native_tools_ok(rec):
+    meta = rec.meta or {}
+    if _rec_key(rec) in _NO_NATIVE or (CFG.get("platforms", {}).get(meta.get("platform"), {}) or {}).get("no_tools"):
+        return False
+    if meta.get("platform") == "ollama":
+        caps = _OLLAMA["caps"].get(meta.get("model"))
+        if caps is not None and caps and "tools" not in caps:
+            return False
+    return True
+
+
+def _forward(kind, val, send, state, buf):
+    if kind == "text":
+        buf.append(val); state["output"] = True
+        send({"type": "token", "text": val})
+    elif kind == "think":
+        send({"type": "think", "text": val})
+    elif kind == "provider":
+        send({"type": "provider", "name": val})
+
+
+def _run_calls(calls, run, results_to):
+    """Execute tool calls, stream their events; return screenshot paths."""
+    images = []
+    for c in calls:
+        cid = uuid.uuid4().hex[:8]
+        name = c["name"]
+        try:
+            args = _parse_tool_args(c.get("arguments", {}))
+        except ValueError as e:
+            args, result, image = {}, f"[invalid tool arguments: {e}]", None
+            run["send"]({"type": "tool_call", "id": cid, "name": name, "args": {}})
+        else:
+            run["send"]({"type": "tool_call", "id": cid, "name": name, "args": args})
+            result, image = _studio_run_tool(name, args, run["cwd"], run["enabled"], run["mcp_tools"],
+                                             run["allowed"], run["send"], run["state"])
+        result = str(result)[:MAX_TOOL_OUTPUT]
+        run["send"]({"type": "tool_result", "id": cid, "name": name, "result": result,
+                     "image": _file_token_url(image) if image else None})
+        results_to(c, name, result)
+        if image:
+            images.append(image)
+        if run["state"]["cancel"]:
+            break
+    return images
+
+
+def _agent_native(msgs, run):
+    """Agent loop with the provider's native function calling."""
+    tools_param, name_map = _tool_schemas(run["enabled"], run["mcp_tools"])
+    rec, rt, ctx, state, send = run["rec"], run["rt"], run["ctx"], run["state"], run["send"]
+    for _ in range(run["rounds"]):
+        buf, calls = [], []
+        for kind, val in rt.chat(rec, msgs, ctx, tools_param):
+            if state["cancel"]:
+                break
+            if kind == "tool_calls":
+                calls = val
+            else:
+                _forward(kind, val, send, state, buf)
+        text = "".join(buf)
+        if state["cancel"]:
+            return
+        if not calls:                       # some models still print a <tool> block
+            for raw in _TOOL_RX.findall(text)[:3]:
+                try:
+                    j = json.loads(raw)
+                    calls.append({"id": "call_" + uuid.uuid4().hex[:10], "name": str(j.get("name", "")),
+                                  "arguments": json.dumps(j.get("args") or j.get("arguments") or {})})
+                except Exception:
+                    pass
+            if not calls:
+                return
+        msgs.append({"role": "assistant", "content": text,
+                     "tool_calls": [{"id": c["id"], "type": "function",
+                                     "function": {"name": c["name"], "arguments": c.get("arguments") or "{}"}}
+                                    for c in calls]})
+        for c in calls:
+            c["name"] = name_map.get(c["name"], c["name"])
+
+        def add(c, name, result):
+            msgs.append({"role": "tool", "tool_call_id": c["id"], "name": name, "content": result or "(no output)"})
+
+        images = _run_calls(calls[:8], run, add)
+        if images and run["vision"]:
+            _drop_old_images(msgs, keep=0)
+            msgs.append({"role": "user", "content": [{"type": "text", "text": _SHOT_MARK},
+                                                     {"type": "image_url", "image_url": {"url": _data_url(images[-1])}}]})
+    send({"type": "token", "text": "\n\n*Reached the step limit for one message — say “continue” to keep going.*"})
+
+
+def _agent_text(hist, run):
+    """Agent loop with the <tool>{json}</tool> text protocol (local models and
+    endpoints without function calling)."""
+    rec, rt, ctx, state, send = run["rec"], run["rt"], run["ctx"], run["state"], run["send"]
+    for _ in range(run["rounds"]):
+        buf = []
+        if run["is_api"]:
+            for kind, val in rt.chat(rec, hist, ctx):
+                if state["cancel"]:
+                    break
+                _forward(kind, val, send, state, buf)
+        else:
+            for c in rt.stream(rec, build_prompt(_text_only(hist), ctx), _text_only(hist), ctx):
+                if state["cancel"]:
+                    break
+                _forward("text", c, send, state, buf)
+        text = "".join(buf)
+        hist.append({"role": "assistant", "content": text})
+        if state["cancel"] or not (run["enabled"] or run["mcp_tools"]):
+            return
+        calls = []
+        for raw in _TOOL_RX.findall(text)[:3]:
+            try:
+                j = json.loads(raw)
+                calls.append({"name": str(j.get("name", "")), "arguments": j.get("args") or j.get("arguments") or {}})
+            except Exception as e:
+                calls.append({"name": "invalid", "arguments": f"not JSON: {e}"})
+        if not calls:
+            return
+        results = []
+        images = _run_calls(calls, run, lambda c, name, result: results.append(
+            f"<tool_result name=\"{name}\">{result}</tool_result>"))
+        body = "\n".join(results)
+        if images and run["vision"] and run["is_api"]:
+            _drop_old_images(hist, keep=0)
+            hist.append({"role": "user", "content": [{"type": "text", "text": _SHOT_MARK + "\n" + body},
+                                                     {"type": "image_url", "image_url": {"url": _data_url(images[-1])}}]})
+        else:
+            hist.append({"role": "user", "content": body})
+    send({"type": "token", "text": "\n\n*Reached the step limit for one message — say “continue” to keep going.*"})
 
 
 def _app_chat_stream(handler, body):
@@ -4651,7 +6319,7 @@ def _app_chat_stream(handler, body):
     mode = body.get("mode") or "chat"
     cwd = body.get("cwd") or str(Path.home())
     sid = _safe_id(body.get("stream_id")) or uuid.uuid4().hex[:10]
-    state = _STREAMS[sid] = {"cancel": False}
+    state = _STREAMS[sid] = {"cancel": False, "minimized": False, "output": False}
     handler._sse()
 
     def send(ev):
@@ -4674,9 +6342,12 @@ def _app_chat_stream(handler, body):
             send({"type": "error", "error": f"No runtime can run {rec.name}. Open Settings → Models to install one."})
             send({"type": "done"}); return
         is_api = rec.kind == "platform"
-        vision = is_api and _is_vision((rec.meta or {}).get("model") or rec.name)
+        meta = rec.meta or {}
+        if meta.get("platform") == "ollama" and meta.get("model"):
+            _ollama_caps(meta["model"])
+        vision = is_api and _rec_vision(rec)
         enabled = []
-        for key in ("code", "web", "computer"):
+        for key in ("code", "web", "computer", "blender"):
             if tools_cfg.get(key):
                 enabled += [t for t in _TOOLSETS[key] if t in TOOLS_IMPL and t not in enabled]
         mcp_ids = tools_cfg.get("mcp") or []
@@ -4684,51 +6355,38 @@ def _app_chat_stream(handler, body):
         ctx = dict(get_context(rec))
         if is_api and int(ctx.get("max_new_tokens", 512)) == int(DEFAULT_CONTEXT["max_new_tokens"]):
             ctx["max_new_tokens"] = 4096
-        ctx["system"] = _studio_system(ctx, enabled, mcp_tools, cwd, mode)
+        allowed = {t for t in (body.get("allowed") or []) if isinstance(t, str)}
+        heavy = tools_cfg.get("computer") or tools_cfg.get("blender") or mcp_tools
+        run = {"rec": rec, "rt": rt, "ctx": ctx, "enabled": enabled, "mcp_tools": mcp_tools, "cwd": cwd,
+               "send": send, "state": state, "allowed": allowed, "vision": vision, "is_api": is_api,
+               "rounds": AGENT_MAX_ROUNDS if heavy else MAX_TOOL_ROUNDS}
         hist = _prep_history(raw_msgs, vision)
-        allowed_always = set()
-        for _round in range(MAX_TOOL_ROUNDS):
-            buf = []
-            for c in rt.stream(rec, build_prompt(_text_only(hist), ctx),
-                               hist if is_api else _text_only(hist), ctx):
-                if state["cancel"]:
-                    break
-                buf.append(c)
-                send({"type": "token", "text": c})
-            text = "".join(buf)
-            hist.append({"role": "assistant", "content": text})
-            if state["cancel"] or not (enabled or mcp_tools):
-                break
-            calls = _TOOL_RX.findall(text)
-            if not calls:
-                break
-            for raw in calls[:3]:
-                try:
-                    call = json.loads(raw)
-                except Exception as e:
-                    hist.append({"role": "user", "content": f"<tool_result>[invalid tool JSON: {e}]</tool_result>"})
-                    continue
-                name = str(call.get("name", ""))
-                args = call.get("args") or {}
-                cid = uuid.uuid4().hex[:8]
-                send({"type": "tool_call", "id": cid, "name": name, "args": args})
-                result, image = _studio_run_tool(name, args, cwd, enabled, mcp_tools,
-                                                 allowed_always, send, state)
-                result = str(result)[:MAX_TOOL_OUTPUT]
-                send({"type": "tool_result", "id": cid, "name": name, "result": result,
-                      "image": _file_token_url(image) if image else None})
-                content = f"<tool_result name=\"{name}\">{result}</tool_result>"
-                if image and vision:
-                    b64 = base64.b64encode(Path(image).read_bytes()).decode()
-                    content = [{"type": "text", "text": content},
-                               {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64}}]
-                hist.append({"role": "user", "content": content})
+        native = is_api and bool(enabled or mcp_tools) and _native_tools_ok(rec)
+        ctx["system"] = _studio_system(ctx, enabled, mcp_tools, cwd, mode, native=native, vision=vision)
+        if native:
+            try:
+                _agent_native(list(hist), run)
+            except ProviderError as e:
+                if not (_tools_unsupported(e) and not state["output"]):
+                    raise
+                _NO_NATIVE.add(_rec_key(rec))            # endpoint has no function calling
+                ctx["system"] = _studio_system(ctx, enabled, mcp_tools, cwd, mode, native=False, vision=vision)
+                _agent_text(hist, run)
+        else:
+            _agent_text(hist, run)
+        if run["allowed"]:
+            send({"type": "allowed", "tools": sorted(run["allowed"])})
         send({"type": "done", "stopped": state["cancel"]})
     except _Cancelled:
         try: send({"type": "done", "stopped": True})
         except Exception: pass
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
         pass
+    except ProviderError as e:
+        try:
+            send({"type": "error", "error": str(e)[:600]}); send({"type": "done"})
+        except Exception:
+            pass
     except Exception as e:
         log_exc("studio chat")
         try:
@@ -4736,6 +6394,8 @@ def _app_chat_stream(handler, body):
         except Exception:
             pass
     finally:
+        if state.get("minimized"):
+            _self_window("restore")
         _STREAMS.pop(sid, None)
 
 
@@ -4843,7 +6503,24 @@ def _app_get_routes(handler, path, q):
             "computer": _computer_status(), "coder_presets": CODER_PRESETS,
             "recent_projects": prefs.get("recent_projects", [])[:8],
             "mcp_gallery": MCP_GALLERY, "claude_desktop_config": str(_claude_desktop_mcp_path()),
-            "local_server": _local_server_ok()})
+            "local_server": _local_server_ok(), "app": APP_UI, "free_enabled": _free_enabled(),
+            "ollama": {"installed": bool(_ollama_bin()), "running": _ollama_version(0.8) is not None},
+            "blender_found": bool(_blender_bin()), "native_window": _WEBVIEW.get("window") is not None,
+            "hardware": _hardware()})
+    if path == "/api/ollama":
+        return handler._json(200, _ollama_status())
+    if path == "/api/catalog":
+        return handler._json(200, _catalog_view())
+    if path == "/api/catalog/trending":
+        try:
+            return handler._json(200, {"models": _hf_trending()})
+        except Exception as e:
+            return handler._json(200, {"models": [], "error": str(e)[:200]})
+    if path == "/api/free":
+        return handler._json(200, {"enabled": _free_enabled(),
+                                   "providers": _free_probe(force=_q1(q, "force") == "1")})
+    if path == "/api/blender":
+        return handler._json(200, _blender_status())
     if path == "/api/models":
         return handler._json(200, {"models": _model_info_list()})
     if path == "/api/providers":
@@ -5006,10 +6683,37 @@ def _app_post_routes(handler, path, body):
         return handler._json(200, _job_public(_job_start("Download " + repo, steps,
                                                          watch_dir=DL_D / "hf" / repo.replace("/", "__"))))
     if path == "/api/computer/screenshot":
-        out = _t_screen({})
-        m = re.search(r"screenshot:\s*(\S+\.png)", out)
-        if not m: return handler._json(400, {"error": out})
-        return handler._json(200, {"ok": True, "url": _file_token_url(m.group(1)), "path": m.group(1)})
+        try:
+            shot, w, h = _cu_capture()
+        except Exception as e:
+            return handler._json(400, {"error": f"couldn't take a screenshot: {e}"})
+        return handler._json(200, {"ok": True, "url": _file_token_url(shot), "path": shot, "width": w, "height": h})
+    if path == "/api/ollama/start":
+        ok, msg = _ollama_start()
+        return handler._json(200 if ok else 400, {"ok": ok, "message": msg, **({} if ok else {"error": msg})})
+    if path == "/api/ollama/pull":
+        return handler._json(200, _job_public(_ollama_pull(body.get("model", ""))))
+    if path == "/api/ollama/delete":
+        _ollama_delete(str(body.get("model", "")))
+        return handler._json(200, {"ok": True})
+    if path == "/api/free/enable":
+        res = _free_enable()
+        return handler._json(200, {"ok": True, "providers": res, "working": any(x.get("ok") for x in res)})
+    if path == "/api/free/disable":
+        CFG.get("platforms", {}).pop("free", None)
+        if _pref("default_model") == "free/auto":
+            CFG["prefs"].pop("default_model", None)
+        save_cfg()
+        return handler._json(200, {"ok": True})
+    if path == "/api/blender/install_bridge":
+        return handler._json(200, {"ok": True, "message": _blender_install_bridge()})
+    if path == "/api/blender/open":
+        return handler._json(200, {"ok": True, "message": _t_blender({"action": "open", "path": body.get("path", "")})})
+    if path == "/api/jobs/cancel":
+        job = _JOBS.get(str(body.get("id")))
+        if job:
+            job["cancel"] = True
+        return handler._json(200, {"ok": bool(job)})
     return handler._json(404, {"error": "not found"})
 
 
@@ -5083,36 +6787,140 @@ def _hide_console():
         pass
 
 
-def cmd_studio(host="127.0.0.1", port=8799, open_ui=True, model=None, hide_console=False):
+def _studio_healthy(url):
+    try:
+        with _urlopen(urllib.request.Request(url.rstrip("/") + "/health"), 1.5) as r:
+            return bool(json.loads(r.read() or b"{}").get("ok"))
+    except Exception:
+        return False
+
+
+def _studio_background():
+    """Keep Ollama alive, find which free models answer, refresh the catalog —
+    all in the background so the window opens immediately."""
+    threading.Thread(target=_ollama_watchdog, daemon=True, name="ollama-watchdog").start()
+
+    def warm():
+        if os.environ.get("SPARKX_OFFLINE"):
+            return
+        try:
+            real = [m for m in _model_info_list() if m.get("kind") != "demo" and m.get("ready")
+                    and m.get("provider") != "free"]
+            if _free_enabled() or not real:
+                _free_probe()
+        except Exception as e:
+            log(f"warm-up: {e}", "warn")
+        try:
+            _catalog()
+        except Exception:
+            pass
+    threading.Thread(target=warm, daemon=True, name="warm-up").start()
+
+
+def _webview_start(webview, func=None):
+    store = APP_D / "webview"
+    store.mkdir(parents=True, exist_ok=True)
+    kw = {"private_mode": False, "storage_path": str(store)}   # keep settings between launches
+    if os.name == "nt":
+        kw["gui"] = "edgechromium"                            # never fall back to old IE
+    webview.start(func, **kw) if func else webview.start(**kw)
+
+
+def _native_window(url):
+    """Open Spark X in a real app window (pywebview: WebView2 on Windows,
+    WebKit on macOS). Blocks until it's closed; False when unavailable."""
+    if os.environ.get("SPARKX_NO_NATIVE"):
+        return False
+    if sys.platform.startswith("linux") and not any(importlib.util.find_spec(m) for m in ("gi", "qtpy")):
+        return False                    # pywebview needs GTK or Qt bindings on Linux
+    try:
+        import webview
+    except Exception:
+        return False
+    try:
+        win = webview.create_window(APP_UI, url, width=1280, height=860, min_size=(960, 620),
+                                    background_color="#1f1e1d", text_select=True)
+        _WEBVIEW["window"] = win
+        _webview_start(webview)
+        return True
+    except Exception as e:
+        log(f"native window unavailable: {e}", "warn")
+        return False
+    finally:
+        _WEBVIEW["window"] = None
+
+
+def _smoke_run(url):
+    """Boot the real window, wait for the app to report ready, then close.
+    Used by CI to prove the packaged app works end to end."""
+    res = {"url": url, "native": False, "ready": False}
+    try:
+        import webview
+        win = webview.create_window(APP_UI, url, width=1100, height=760, background_color="#1f1e1d")
+        _WEBVIEW["window"] = win
+
+        def check():
+            try:
+                res["loaded"] = bool(win.events.loaded.wait(90))
+                for _ in range(120):
+                    if win.evaluate_js("!!(window.__spark && window.__spark.ready)"):
+                        res["ready"] = True
+                        break
+                    time.sleep(0.5)
+                res["title"] = win.evaluate_js("document.title")
+                res["models"] = win.evaluate_js("window.__spark ? window.__spark.models : -1")
+                res["native"] = True
+            except Exception as e:
+                res["error"] = f"{type(e).__name__}: {e}"
+            finally:
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+        _webview_start(webview, check)
+    except Exception as e:
+        res["error"] = f"{type(e).__name__}: {e}"
+    txt = json.dumps(res)
+    out = os.environ.get("SPARKX_SMOKE_OUT")
+    if out:
+        Path(out).write_text(txt, encoding="utf-8")
+    print(txt)
+    return 0 if res.get("ready") else 1
+
+
+def cmd_studio(host="127.0.0.1", port=8799, open_ui=True, model=None, hide_console=False, smoke=False):
     _app_dirs(); _start_scheduler(); _studio_tokens()
     if model:
         rec = match_model(model)
         if rec: _SERVE["rec"] = rec
+    url_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
     try:
         srv = _QuietHTTPServer((host, port), _ServeHandler)
     except OSError:
-        url = f"http://{host}:{port}/"
-        print(YL + f"  CS Studio already running at {url}" + RSTC)
-        if open_ui and not _open_app_window(url):
-            import webbrowser; webbrowser.open(url)
-        return
+        existing = f"http://{url_host}:{port}/"
+        if not smoke and _studio_healthy(existing):
+            print(YL + f"  {APP_UI} is already running at {existing}" + RSTC)
+            if open_ui and not _native_window(existing) and not _open_app_window(existing):
+                import webbrowser; webbrowser.open(existing)
+            return
+        srv = _QuietHTTPServer((host, 0), _ServeHandler)      # port taken by something else
+    port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '') else host}:{port}/"
-    print(MG + "  CS Studio  " + RSTC + url)
-    print(DIM + "  chat · code · browser · artifacts · routines · connectors — Ctrl-C to quit" + RSTC)
+    _studio_background()
+    url = f"http://{url_host}:{port}/"
+    print(MG + f"  {APP_UI}  " + RSTC + url)
+    print(DIM + "  chat · code · computer · blender · browser · artifacts — Ctrl-C to quit" + RSTC)
+    if smoke:
+        code = _smoke_run(url)
+        _APP_SCHED["stop"] = True; srv.shutdown()
+        sys.exit(code)
     window = None
     if open_ui:
-        try:
-            import webview  # optional: pywebview gives a true native window
-            webview.create_window(APP_LONG, url, width=1280, height=860, min_size=(960, 620),
-                                  background_color="#1f1e1c")
-            webview.start()
+        if hide_console:
+            _hide_console()
+        if _native_window(url):                                # blocks until closed
             _APP_SCHED["stop"] = True; srv.shutdown(); return
-        except Exception:
-            pass
         window = _open_app_window(url)
-        if window and hide_console:
-            _hide_console()          # the app window is up; closing it quits
         if not window:
             try:
                 import webbrowser; webbrowser.open(url)
@@ -5133,6 +6941,34 @@ def cmd_studio(host="127.0.0.1", port=8799, open_ui=True, model=None, hide_conso
         print(YL + "  ⌁ stopped" + RSTC)
     finally:
         _APP_SCHED["stop"] = True; srv.shutdown()
+
+
+def _is_gui_exe():
+    """The packaged 'Spark X' app executable (as opposed to the `cs` CLI)."""
+    if not getattr(sys, "frozen", False):
+        return False
+    return re.sub(r"[\s_-]", "", Path(sys.executable).stem.lower()) == "sparkx"
+
+
+def gui_main():
+    """Start Spark X in its own window: the packaged `Spark X` app and the
+    `spark-x` command (pip install) both land here."""
+    try:
+        no_terminal = getattr(sys, "frozen", False) and not sys.stdout.isatty()
+    except Exception:
+        no_terminal = True
+    if _NO_CONSOLE or no_terminal:            # started from Finder / Start menu: log to a file
+        LOGS_D.mkdir(parents=True, exist_ok=True)
+        f = open(LOGS_D / "spark-x.log", "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stderr = f
+    args = sys.argv[1:]
+    port = 8799
+    if "--port" in args:
+        try:
+            port = int(args[args.index("--port") + 1])
+        except (IndexError, ValueError):
+            pass
+    cmd_studio(port=port, open_ui=True, smoke="--smoke" in args)
 
 
 # ─── commands ──────────────────────────────────────────────────────────────
@@ -6392,6 +8228,10 @@ def cmd_platforms():
 
 # ─── CLI ───────────────────────────────────────────────────────────────────
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--py-exec":
+        _py_exec(sys.argv[2:]); return
+    if _is_gui_exe():
+        gui_main(); return
     ap = build_cli()
     a = ap.parse_args()
 
@@ -6515,7 +8355,7 @@ def main():
         if rec: edit_context(rec)
         else: print(RD + f"no match: {a.model}" + RSTC)
     elif a.cmd == "serve": cmd_serve(a.host, a.port, a.model)
-    elif a.cmd == "studio": cmd_studio(a.host, a.port, not getattr(a, "no_open", False), a.model)
+    elif a.cmd == "studio": cmd_studio(a.host, a.port, not getattr(a, "no_open", False), a.model, smoke=getattr(a, "smoke", False))
     elif a.cmd == "agents": cmd_agents(a.action, a.agent, a.model)
     elif a.cmd == "plugin-init": cmd_plugin_init(a.name)
     elif a.cmd == "clean": cmd_clean(a.downloads)
@@ -7358,12 +9198,30 @@ def menu_main():
 
 # ---------- computer use tools ----------
 def _pyautogui():
+    # pyautogui imports mouseinfo, which calls sys.exit() on Linux when tkinter
+    # is missing (the packaged app ships without tkinter). mouseinfo is only
+    # an interactive helper, so give it a stand-in instead of dying.
+    if "mouseinfo" not in sys.modules and importlib.util.find_spec("tkinter") is None:
+        stub = types.ModuleType("mouseinfo")
+        stub.MouseInfoWindow = lambda *a, **k: None
+        sys.modules["mouseinfo"] = stub
+    # python-xlib refuses to connect when there is no Xauthority file at all
+    # (some Linux sessions don't create one); an empty one means "no auth".
+    if sys.platform.startswith("linux") and os.environ.get("DISPLAY"):
+        xa = os.environ.get("XAUTHORITY") or str(Path.home() / ".Xauthority")
+        if not Path(xa).exists():
+            empty = Path(tempfile.gettempdir()) / "sparkx-empty-xauthority"
+            try:
+                empty.touch(exist_ok=True)
+                os.environ["XAUTHORITY"] = str(empty)
+            except OSError:
+                pass
     try:
         import pyautogui as pg
         pg.FAILSAFE = True
-        pg.PAUSE = 0.15
+        pg.PAUSE = 0.05
         return pg
-    except Exception:
+    except (Exception, SystemExit):
         return None
 
 
@@ -7376,7 +9234,7 @@ def _ensure_screen_dir():
 def _mss_shot():
     try:
         import mss, mss.tools
-        with mss.mss() as sct:
+        with (getattr(mss, "MSS", None) or mss.mss)() as sct:
             mon = sct.monitors[1]
             img = sct.grab(mon)
             out = _ensure_screen_dir() / ("shot_" + str(int(time.time())) + ".png")

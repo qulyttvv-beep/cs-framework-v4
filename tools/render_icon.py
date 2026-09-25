@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Render the CS Framework 3D app icon.
+"""Render the Spark X 3D app icon.
 
 A small signed-distance-field raymarcher (numpy only) that renders a rounded,
-three-tone prism emblem floating over a graphite squircle plate, lit like a
+three-tone cube emblem floating over a graphite squircle plate, lit like a
 product shot: warm key light, cool fill, rim light, glossy studio reflections,
-soft shadows, ambient occlusion and a filmic tone curve.
+crisp shadows, ambient occlusion and a filmic tone curve. Small sizes are
+rendered at their own resolution (not shrunk from the master) so they stay sharp.
 
-    python tools/render_icon.py            # writes assets/icon*.png, .ico, .icns
+    python tools/render_icon.py            # writes assets/icon*.png, sparkx.ico, sparkx.icns
     python tools/render_icon.py --size 512 --preview   # fast preview only
 
 Requires: numpy, pillow.
@@ -46,19 +47,19 @@ def smoothstep(e0, e1, x):
 # ── scene ────────────────────────────────────────────────────────────────────
 CENTER = np.array([0.0, 0.16, 9.6])          # cube centre (camera looks +z)
 HALF = 0.78                                   # half extent
-RADIUS = 0.21                                 # edge rounding
+RADIUS = 0.075                                # edge bevel: small = crisp edges
 PLATE_Z = CENTER[2] + 1.55                     # back plate, facing the camera
 # object -> world: spin 45° about Y, then tip the top toward the camera
 R_OW = rot_x(np.radians(-32.0)) @ rot_y(np.radians(45.0))
 
 # face albedos (linear) keyed by object-space axis/sign
 FACE = {
-    (1, +1): np.array([0.60, 0.565, 0.51]),   # +Y top    warm bone ceramic
+    (1, +1): np.array([0.655, 0.615, 0.55]),  # +Y top    warm bone ceramic
     (1, -1): np.array([0.20, 0.20, 0.22]),
-    (2, +1): np.array([0.52, 0.20, 0.10]),    # lit side  fired clay
-    (2, -1): np.array([0.52, 0.20, 0.10]),
-    (0, +1): np.array([0.050, 0.051, 0.058]), # shade side graphite
-    (0, -1): np.array([0.050, 0.051, 0.058]),
+    (2, +1): np.array([0.60, 0.215, 0.09]),   # lit side  fired clay
+    (2, -1): np.array([0.60, 0.215, 0.09]),
+    (0, +1): np.array([0.072, 0.075, 0.086]), # shade side graphite
+    (0, -1): np.array([0.072, 0.075, 0.086]),
 }
 PLATE = np.array([0.030, 0.030, 0.034])
 
@@ -68,7 +69,7 @@ KEY_COL = np.array([1.00, 0.95, 0.88]) * 2.1
 FILL_DIR = normalize(np.array([0.85, 0.10, -0.55]))
 FILL_COL = np.array([0.55, 0.65, 0.85]) * 0.35
 RIM_DIR = normalize(np.array([0.55, 0.35, 0.95]))
-RIM_COL = np.array([1.0, 0.85, 0.72]) * 1.1
+RIM_COL = np.array([1.0, 0.86, 0.74]) * 1.6
 
 
 def sd_round_box(p, b, r):
@@ -95,7 +96,7 @@ def calc_normal(p):
     return normalize(n)
 
 
-def soft_shadow(ro, rd, mint=0.02, maxt=6.0, k=10.0, steps=72):
+def soft_shadow(ro, rd, mint=0.02, maxt=6.0, k=26.0, steps=96):
     res = np.ones(ro.shape[0])
     t = np.full(ro.shape[0], mint)
     for _ in range(steps):
@@ -123,8 +124,15 @@ def environment(r):
     sky = smoothstep(0.25, 0.95, r[:, 1])[:, None] * np.array([1.0, 0.97, 0.92]) * 1.6
     strip = (smoothstep(0.55, 0.9, -r[:, 0]) * smoothstep(-0.2, 0.3, r[:, 1]))[:, None] \
         * np.array([0.9, 0.95, 1.0]) * 0.30
+    # a cool strip on the right: the graphite face picks up a faint sheen
+    strip_r = (smoothstep(0.45, 0.95, r[:, 0])
+               * smoothstep(-0.95, -0.40, r[:, 1]) * (1 - smoothstep(-0.05, 0.35, r[:, 1])))[:, None] \
+        * np.array([0.80, 0.88, 1.0]) * 0.42
+    # an edge light behind the cube: grazing bevels on the silhouette reflect it,
+    # tracing a thin crisp outline that separates the cube from the dark plate
+    back = smoothstep(0.55, 0.97, r[:, 2])[:, None] * np.array([0.86, 0.90, 1.0]) * 1.1
     base = np.array([0.018, 0.018, 0.022])
-    return base + sky + strip
+    return base + sky + strip + strip_r + back
 
 
 def face_albedo(n_world):
@@ -153,7 +161,7 @@ def shade_object(p, n, v):
         else:
             sh = np.ones(p.shape[0])
         hvec = normalize(ldir - v)
-        spec = np.clip((n * hvec).sum(-1), 0.0, 1.0) ** 90 * 0.9 * spec_k
+        spec = np.clip((n * hvec).sum(-1), 0.0, 1.0) ** 140 * 1.25 * spec_k
         col += (alb * ndl[:, None] + spec[:, None]) * lcol * sh[:, None]
     # hemispherical ambient
     col += alb * (0.06 + 0.10 * (0.5 + 0.5 * n[:, 1]))[:, None] * ao[:, None]
@@ -167,7 +175,7 @@ def shade_object(p, n, v):
 
 def shade_plate(p, v):
     n = np.broadcast_to(np.array([0.0, 0.0, -1.0]), p.shape)
-    sh = soft_shadow(p + n * 0.01, np.broadcast_to(SHADOW_DIR, p.shape), k=3.2, maxt=5.0)
+    sh = soft_shadow(p + n * 0.01, np.broadcast_to(SHADOW_DIR, p.shape), k=7.5, maxt=5.0)
     ndl = np.clip(n @ SHADOW_DIR, 0.0, 1.0)
     # a soft pool of light on the plate, top-centre, like a product stage
     glow = np.exp(-((p[:, 0] - CENTER[0]) ** 2 * 0.16 + (p[:, 1] - 1.3) ** 2 * 0.22))
@@ -254,10 +262,23 @@ def compose(scene_rgb: np.ndarray, size: int, inset: float) -> Image.Image:
     return canvas
 
 
+def sharpen(img: Image.Image, amount: int) -> Image.Image:
+    """Unsharp the RGB only, so the anti-aliased squircle edge stays clean."""
+    rgb = img.convert("RGB").filter(ImageFilter.UnsharpMask(radius=1.0, percent=amount, threshold=1))
+    rgb.putalpha(img.getchannel("A"))
+    return rgb
+
+
+def small_icon(size: int, inset: float) -> Image.Image:
+    """Render a small size natively (4x supersampled) instead of shrinking the
+    1024 master, which smears the bevels and edges at 16-64 px."""
+    return sharpen(compose(render(size * 4), size, inset), 80)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--size", type=int, default=1024)
-    ap.add_argument("--ss", type=int, default=2, help="supersampling factor")
+    ap.add_argument("--ss", type=int, default=3, help="supersampling factor")
     ap.add_argument("--inset", type=float, default=0.06)
     ap.add_argument("--preview", action="store_true")
     a = ap.parse_args()
@@ -271,15 +292,22 @@ def main():
         print("wrote", out)
         return
     icon.save(ASSETS / "icon.png")
+    sizes = {}
+    for s in (512, 256, 128):
+        sizes[s] = sharpen(icon.resize((s, s), Image.LANCZOS), 45)
+    for s in (64, 48, 32, 24, 16):
+        # tiny icons get a slimmer margin so the cube stays legible
+        sizes[s] = small_icon(s, a.inset * (0.6 if s <= 32 else 0.8))
     for s in (512, 256, 128, 64, 32, 16):
-        icon.resize((s, s), Image.LANCZOS).save(ASSETS / f"icon-{s}.png")
-    icon.save(ASSETS / "cs.ico", sizes=[(16, 16), (24, 24), (32, 32), (48, 48),
-                                        (64, 64), (128, 128), (256, 256)])
+        sizes[s].save(ASSETS / f"icon-{s}.png")
+    ico_sizes = (256, 128, 64, 48, 32, 24, 16)
+    sizes[256].save(ASSETS / "sparkx.ico", sizes=[(s, s) for s in ico_sizes],
+                    append_images=[sizes[s] for s in ico_sizes[1:]])
     try:
-        icon.save(ASSETS / "cs.icns")
+        icon.save(ASSETS / "sparkx.icns", append_images=[sizes[s] for s in (512, 256, 128, 64, 32, 16)])
     except Exception as e:  # pillow builds without icns support
         print("icns skipped:", e)
-    print("wrote icon.png, icon-*.png, cs.ico, cs.icns to", ASSETS)
+    print("wrote icon.png, icon-*.png, sparkx.ico, sparkx.icns to", ASSETS)
 
 
 if __name__ == "__main__":

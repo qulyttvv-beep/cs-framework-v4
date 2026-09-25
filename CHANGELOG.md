@@ -1,7 +1,95 @@
 # Changelog
 
-All notable changes to CS Framework are documented here. This project adheres
-to [Semantic Versioning](https://semver.org/).
+All notable changes to Spark X and the CS Framework are documented here. This
+project adheres to [Semantic Versioning](https://semver.org/).
+
+## [4.3.0] — 2026-09-25
+
+The "Spark X" release. The app is now called **Spark X**, installs like a real
+desktop app, works the moment it opens, runs and looks after local models, and
+can really use your computer, including Blender.
+
+### Added
+- **A real desktop app.** Spark X opens in its own window (WebView2 on Windows,
+  WebKit on macOS) instead of a browser tab.
+  - **Windows installer** (`SparkX-Setup-x64.exe`): installs for the current
+    user without an admin prompt, adds a Start-menu entry, and optionally a
+    desktop icon and the `cs` command on `PATH`. It has a proper uninstaller.
+  - **macOS app** (`SparkX-macOS-arm64.dmg`): drag `Spark X.app` to
+    Applications.
+  - Installed builds keep settings and chats in the user profile
+    (`%APPDATA%\Spark X`, `~/Library/Application Support/Spark X`), so updates
+    don't touch them. The windowed app logs to `logs/spark-x.log`.
+  - `pip install "cs-framework[studio]"` adds a `spark-x` command that opens
+    the same window.
+- **Free model at launch.** The first screen offers *Free model*, *Local with
+  Ollama* and *Free API key*. *Free model* uses keyless public services that are
+  open to everyone by design ([Pollinations](https://pollinations.ai),
+  [LLM7](https://llm7.io)): Spark X checks which ones answer, uses the first
+  that works and fails over to the next. Replies say which service answered.
+  It's clearly labelled, off until you pick it, and can be turned off under
+  *Settings → Providers*.
+- **Ollama, looked after.** Spark X starts Ollama when the app opens and a
+  watchdog restarts it if it stops or crashes (*Keep Ollama running*). Models
+  can be downloaded (with progress and cancel), used and deleted from
+  *Settings → Models*, including any GGUF on Hugging Face as `hf.co/owner/repo`.
+- **Model suggestions.** A hand-picked list of current open models (gpt-oss,
+  Qwen3, Gemma 3, Mistral Small 3.2, DeepSeek-R1, Magistral, Qwen3-Coder,
+  Devstral, Qwen2.5-VL, Phi-4 mini, Llama …) marked by what fits this computer's
+  RAM / VRAM and what each is best at, with filters. *Trending on Hugging Face*
+  lists popular GGUF models live.
+- **Computer use that works end to end.**
+  - Models use native function calling. After every action the model gets a
+    fresh screenshot as an image (vision models) to check the result, for up
+    to 40 steps per task.
+  - Screenshot coordinates are mapped to the real screen, including HiDPI
+    displays.
+  - Actions: click, double / right / middle click, drag, scroll (both
+    directions), type (non-ASCII text is pasted), key combinations with each
+    platform's names, wait, and cursor position. A new `open` tool launches
+    apps, files and URLs.
+  - Each action asks first with a plain description ("Allow Spark X to click
+    at (640, 360)?"). With *Always allow*, the Spark X window steps aside while
+    the model works.
+  - Pushing the mouse into a screen corner stops the whole task.
+- **Blender.** A `blender` tool that:
+  - runs the model's `bpy` script in a background Blender with ready-made
+    helpers (materials, lights, camera, render, save);
+  - shows the render in the chat and saves the `.blend`;
+  - falls back to Cycles when EEVEE has no GPU;
+  - can open a `.blend` in Blender.
+
+  The **Spark X bridge** add-on (installed from *Connectors → Blender* in one
+  click) lets the model build in the Blender you have open. It listens on
+  `127.0.0.1` only and needs a random per-session key.
+- Reasoning models' thinking is shown as a collapsible *Thought process*.
+- Models without function calling fall back to the text tool protocol
+  automatically.
+
+### Changed
+- **CS Studio is now Spark X**, with a new, sharper 3D icon rendered at every
+  size. The demo model is now *Spark Echo*.
+- Pollinations moved from the provider list into the *Free model* option.
+- Releases ship the Windows installer, the macOS disk image, the three
+  single-file `cs` binaries and `SHA256SUMS.txt`. The release workflow installs
+  the Windows setup, opens the real app window on Windows and macOS and waits
+  for the UI to report ready before publishing. Pull requests run the same
+  checks.
+
+### Performance
+- Plugins are only reloaded when their folder changes. Runtime availability is
+  cached for 10 s, and GGUF "needs the PrismML fork" checks are cached by file.
+- Local model servers are reached without going through any configured HTTP
+  proxy.
+- Only the newest screenshot stays in the conversation sent to the model, so
+  long computer-use tasks don't send megabytes per step.
+
+### Fixed
+- The windowed app doesn't crash on start without a console, and on Windows
+  the commands it runs don't flash console windows.
+- Computer use no longer fails when `tkinter` or `~/.Xauthority` is missing
+  (Linux), and uses the current `mss` API.
+- Error messages from providers no longer end in a dangling "HTTP 503:".
 
 ## [4.2.0] — 2026-09-25
 
