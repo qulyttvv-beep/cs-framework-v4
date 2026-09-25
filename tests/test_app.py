@@ -134,12 +134,15 @@ def _studio(home: Path):
     base = f"http://127.0.0.1:{port}"
     try:
         deadline = time.time() + 40
-        while time.time() < deadline:
+        while True:
             if proc.poll() is not None:
                 raise RuntimeError("studio exited early:\n" + (home / "studio.log").read_text())
             try:
                 urllib.request.urlopen(base + "/health", timeout=2); break
-            except Exception:
+            except Exception as e:
+                if time.time() > deadline:
+                    raise RuntimeError(f"studio never became healthy ({e}):\n"
+                                       + (home / "studio.log").read_text())
                 time.sleep(0.3)
         yield Studio(base)
     finally:

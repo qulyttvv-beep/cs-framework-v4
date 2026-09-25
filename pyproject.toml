@@ -54,3 +54,5 @@ cs_studio = ["static/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# a stuck test dumps every thread's stack instead of hanging silently
+faulthandler_timeout = 120
