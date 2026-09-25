@@ -70,10 +70,12 @@ jobs:
         run: |
           set -euo pipefail
           BIN="out/${{ matrix.asset }}"
+          # The binary is portable: without CS_HOME it writes cs_data/ next to
+          # itself, which would land in out/ and get published. Keep it elsewhere.
+          export CS_HOME="$RUNNER_TEMP/cs-smoke"
           "$BIN" --version
           "$BIN" selftest
           # the bundled Studio app must serve its frontend from inside the exe
-          export CS_HOME="$RUNNER_TEMP/cs-smoke"
           "$BIN" studio --no-open --port 8799 &
           PID=$!
           for i in $(seq 1 40); do curl -sf http://127.0.0.1:8799/health >/dev/null && break; sleep 1; done
@@ -85,7 +87,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: out/*
+          path: |
+            out/${{ matrix.asset }}
+            out/${{ matrix.asset }}.sha256
+          if-no-files-found: error
           retention-days: 7
 
   release:
@@ -105,11 +110,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          find artifacts -type f -exec cp {} release/ \;
+          # only the binaries and their checksums are release assets
+          find artifacts -type f -name 'cs-*' -exec cp {} release/ \;
           cd release
           cat *.sha256 > SHA256SUMS.txt
           rm -f *.sha256
           ls -la
+          test "$(ls | wc -l)" -eq 4   # 3 binaries + SHA256SUMS.txt
 
       - name: Resolve tag name
         id: tag
@@ -118,6 +125,21 @@ jobs:
             echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           else
             echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Remove stale assets from an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            for a in $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name'); do
+              if [ ! -f "release/$a" ]; then
+                echo "deleting stale asset: $a"
+                gh release delete-asset "$TAG" "$a" --repo "$GITHUB_REPOSITORY" --yes
+              fi
+            done
           fi
 
       - name: Publish GitHub Release
