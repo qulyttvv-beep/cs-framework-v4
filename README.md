@@ -732,6 +732,7 @@ Windows across Python 3.9–3.12 on every push and pull request.
    HTML/CSS/JS in `cs_studio/static/`, with no build step and no gradients.
 
 ---
+--thanks claude
 
 ## License
 
