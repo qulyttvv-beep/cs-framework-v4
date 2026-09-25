@@ -12,7 +12,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/platform-windows%20%7C%20linux%20%7C%20macos-lightgrey.svg" alt="Platforms">
-  <img src="https://img.shields.io/badge/version-4.0.0-brightgreen.svg" alt="Version 4.0.0">
+  <img src="https://img.shields.io/badge/version-4.1.0-brightgreen.svg" alt="Version 4.1.0">
 </p>
 
 ---
@@ -47,7 +47,41 @@ workbench:
 
 ## Install
 
-### Windows
+### Download a prebuilt binary (no Python needed)
+
+Grab the single-file executable for your platform from the
+[latest release](https://github.com/qulyttvv-beep/cs-framework-v4/releases/latest):
+
+| Platform | Asset |
+|---|---|
+| Windows x64 | `cs-windows-x86_64.exe` |
+| Linux x64 | `cs-linux-x86_64` |
+| macOS (Apple Silicon) | `cs-macos-arm64` |
+| macOS (Intel) | `cs-macos-x86_64` |
+
+```bash
+# macOS / Linux
+chmod +x cs-linux-x86_64
+./cs-linux-x86_64                 # run it
+./cs-linux-x86_64 install-self    # optional: add `cs` to your PATH
+```
+
+On Windows, rename the download to `cs.exe` and run it from a terminal. Verify
+your download against `SHA256SUMS.txt` published with the release.
+
+The binary stores everything in a `cs_data/` folder **next to the executable**,
+so copy the pair to a USB stick or another machine and it all travels together.
+
+### Install with pipx (Python users)
+
+```bash
+pipx install git+https://github.com/qulyttvv-beep/cs-framework-v4
+cs
+```
+
+(or `pip install git+https://github.com/qulyttvv-beep/cs-framework-v4`)
+
+### Windows (from source)
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -58,7 +92,7 @@ The installer fetches Python, Git, CMake, Ninja, MSVC Build Tools,
 CUDA (if NVIDIA), and Ollama (optional), then runs the framework's own
 `setup` wizard and registers the `cs` global command.
 
-### Linux / macOS
+### Linux / macOS (from source)
 
 ```bash
 chmod +x install.sh
@@ -151,11 +185,18 @@ python build.py --with-models      # include local models (huge)
 | `cs connect <platform>` | Connect a remote API |
 | `cs agents <list\|install\|launch> [id]` | Coding-agent hub |
 | `cs plugin-init <name>` | Scaffold a plugin |
-| `cs doctor` | System + runtime diagnostics |
+| `cs pull <name> [--only PAT]` | Download a model from Hugging Face |
+| `cs ps` | List running `cs serve` processes |
+| `cs stop [target]` | Stop running servers |
+| `cs rm <model>` | Delete a model file from disk |
+| `cs platforms` | List connectable API platforms + status |
+| `cs health` | Runtime + server health panel |
+| `cs doctor [--deep]` | System + runtime diagnostics |
 | `cs bonsai-setup` | PrismML fork status + ternary models |
 | `cs ll-log` | Tail the newest llama-server log |
 | `cs export [zip]` | Package cs.py + cs_data |
 | `cs selftest` | Run internal tests |
+| `cs version` / `cs --version` | Print version and exit |
 | `cs clean [--downloads]` | Clear caches |
 
 ### `cs install` targets
@@ -527,11 +568,38 @@ model's format details.
 
 ---
 
+## Build from source
+
+The framework is pure standard library, so building a standalone binary needs
+only PyInstaller:
+
+```bash
+pip install pyinstaller
+pyinstaller cs.spec            # -> dist/cs   (dist/cs.exe on Windows)
+```
+
+Model runtimes (torch, transformers, llama.cpp, …) are **not** bundled — they
+are installed on demand with `cs install`, keeping the binary small (~8 MB).
+
+Prebuilt binaries for Windows, Linux, and macOS (Intel + Apple Silicon) are
+built and published automatically by the `Release` GitHub Actions workflow
+whenever a `v*` tag is pushed.
+
+## Testing
+
+```bash
+python cs.py selftest          # fast built-in checks
+pip install pytest && pytest   # full suite in tests/
+```
+
+CI runs the syntax check, `selftest`, and the pytest suite on Linux, macOS, and
+Windows across Python 3.9–3.12 on every push and pull request.
+
 ## Contributing
 
 1. Fork the repository.
 2. Create a feature branch: `git checkout -b feature/my-thing`.
-3. Test with `python cs.py selftest` before opening a PR.
+3. Run `python cs.py selftest` and `pytest` before opening a PR.
 4. Keep `cs.py` as a single file — no new imports at module scope that
    aren't wrapped in a try/except.
 

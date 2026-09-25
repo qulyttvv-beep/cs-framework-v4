@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cs-framework"
+version = "4.1.0"
+description = "Single-file portable local-LLM runner, model manager, and coding-agent hub"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "qulyttvv-beep" }]
+keywords = ["llm", "llama.cpp", "gguf", "transformers", "ollama", "cli", "openai", "agent"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Utilities",
+]
+# The framework itself is pure standard library — every model runtime is an
+# optional, lazily-imported dependency installed on demand via `cs install`.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/qulyttvv-beep/cs-framework-v4"
+Repository = "https://github.com/qulyttvv-beep/cs-framework-v4"
+Issues = "https://github.com/qulyttvv-beep/cs-framework-v4/issues"
+
+[project.optional-dependencies]
+# Convenience extras — install a real runtime with e.g. `pip install cs-framework[llama]`
+llama = ["llama-cpp-python"]
+transformers = ["transformers", "tokenizers", "accelerate", "safetensors"]
+onnx = ["onnxruntime"]
+hub = ["huggingface_hub", "hf_transfer"]
+compute = ["mss", "pyautogui", "pytesseract", "pillow"]
+dev = ["pytest>=7", "pyinstaller>=6"]
+
+[project.scripts]
+cs = "cs:main"
+
+[tool.setuptools]
+py-modules = ["cs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
