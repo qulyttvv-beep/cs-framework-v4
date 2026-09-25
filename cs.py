@@ -94,13 +94,50 @@ if "PIP_TARGETS" not in globals():
     }
 
 
-# --- forced TOOLS_HEADER (repair) ---
+# --- TOOLS_SPEC: name + description for every code-mode tool ---
+# NOTE: TOOLS_SPEC must be defined BEFORE TOOLS_HEADER, which is built from it.
+if "TOOLS_SPEC" not in globals():
+    _TOOL_DESCS = {
+        "bash":         '{"cmd":str} — run a shell command, return stdout+stderr',
+        "read":         '{"path":str,"offset":int=0,"limit":int=200} — read a text file',
+        "write":        '{"path":str,"content":str} — overwrite (or create) a file',
+        "append":       '{"path":str,"content":str} — append to a file',
+        "ls":           '{"path":str="."} — list a directory',
+        "glob":         '{"pattern":str,"root":str="."} — glob for matching files',
+        "grep":         '{"pattern":str,"root":str=".","glob":str="**/*"} — search file contents',
+        "web_fetch":    '{"url":str} — fetch a URL and return its text',
+        "python":       '{"code":str} — execute a Python snippet, return its output',
+        "http":         '{"url":str,"method":str="GET","headers":dict?,"body":str?} — raw HTTP request',
+        "download":     '{"url":str,"dest":str} — download a file to disk',
+        "extract":      '{"path":str,"dest":str?} — extract a .zip/.tar archive',
+        "tree":         '{"path":str=".","depth":int=2} — print a directory tree',
+        "diff":         '{"a":str,"b":str} — unified diff between two files',
+        "find":         '{"name":str,"root":str="."} — find files by name pattern',
+        "wc":           '{"path":str} — count lines, words and bytes of a file',
+        "notify":       '{"message":str,"title":str?} — desktop notification',
+        "clip_read":    '{} — read the system clipboard',
+        "clip_write":   '{"text":str} — write text to the system clipboard',
+        "screen":       '{"path":str?} — capture a screenshot',
+        "screen_size":  '{} — return the screen dimensions',
+        "mouse_move":   '{"x":int,"y":int} — move the mouse pointer',
+        "mouse_click":  '{"x":int?,"y":int?,"button":str="left","clicks":int=1} — click the mouse',
+        "mouse_drag":   '{"x1":int,"y1":int,"x2":int,"y2":int} — drag the mouse',
+        "scroll":       '{"amount":int} — scroll the mouse wheel',
+        "key":          '{"keys":str} — press a key or hotkey combo',
+        "type":         '{"text":str} — type text with the keyboard',
+        "window_list":  '{} — list open windows',
+        "window_focus": '{"title":str} — focus a window by title',
+        "app_start":    '{"name":str,"args":list?} — launch an application',
+        "sleep":        '{"seconds":float} — pause for a number of seconds',
+        "ocr":          '{"path":str?} — OCR text from a screenshot or image',
+    }
+    TOOLS_SPEC = [{"name": _n, "desc": _d} for _n, _d in _TOOL_DESCS.items()]
+
+
+# --- TOOLS_HEADER: system-prompt preamble injected in code mode ---
 if "TOOLS_HEADER" not in globals():
-    try:
-        _th_lines = ["- " + t["name"] + ": " + (t.get("desc") or "")
-                     for t in TOOLS_SPEC]
-    except Exception:
-        _th_lines = []
+    _th_lines = ["- " + t["name"] + ": " + (t.get("desc") or "")
+                 for t in TOOLS_SPEC]
     TOOLS_HEADER = (
         "You are running inside CS Framework's coding mode.\n"
         "\n"
@@ -114,25 +151,22 @@ if "TOOLS_HEADER" not in globals():
     )
 
 
-# --- forced TOOLS_SPEC (repair) ---
-if "TOOLS_SPEC" not in globals():
-    TOOLS_SPEC = []
-    for _n in ("bash","read","write","append","ls","glob","grep","web_fetch",
-               "python","http","download","extract","tree","diff","find","wc",
-               "notify","clip_read","clip_write","screen","screen_size",
-               "mouse_move","mouse_click","mouse_drag","scroll","key","type",
-               "window_list","window_focus","app_start","sleep","ocr"):
-        TOOLS_SPEC.append({"name": _n, "desc": ""})
-
-
 
 def build_cli():
-    """Return an argparse parser with every subcommand."""
+    """Return the single argparse parser used by the CLI.
+
+    This is the ONE source of truth for subcommands — main() dispatches
+    against it and cmd_doctor() audits it, so every command listed here is
+    guaranteed to be reachable.
+    """
     import argparse as _ap
     ap = _ap.ArgumentParser(prog=APP,
                             description=APP_LONG + " — portable LLM runner")
+    ap.add_argument("-V", "--version", action="version",
+                    version=f"{APP_LONG} {VERSION} ({CODENAME})")
     sub = ap.add_subparsers(dest="cmd")
 
+    sub.add_parser("version", help="print version and exit")
     sp = sub.add_parser("setup"); sp.add_argument("--full", action="store_true"); sp.add_argument("--quiet", action="store_true")
     sub.add_parser("install-self"); sub.add_parser("scan"); sub.add_parser("list")
     sub.add_parser("venvs")
@@ -145,12 +179,13 @@ def build_cli():
     ra.add_argument("model", nargs="?")
     actx = sub.add_parser("auto-ctx")
     actx.add_argument("value", nargs="?", choices=["on","off","true","false","1","0"])
-    sub.add_parser("doctor"); sub.add_parser("selftest"); sub.add_parser("logo")
+    dc = sub.add_parser("doctor"); dc.add_argument("--deep", action="store_true")
+    sub.add_parser("selftest"); sub.add_parser("logo")
     sub.add_parser("bonsai-setup"); sub.add_parser("ll-log"); sub.add_parser("menu")
     sub.add_parser("explore"); sub.add_parser("health"); sub.add_parser("agent")
-    sub.add_parser("stop"); sub.add_parser("hex"); sub.add_parser("rig")
+    sub.add_parser("hex"); sub.add_parser("rig")
     sub.add_parser("screen"); sub.add_parser("windows"); sub.add_parser("size")
-    sub.add_parser("platforms")
+    sub.add_parser("platforms"); sub.add_parser("ps")
 
     v = sub.add_parser("verify"); v.add_argument("query", nargs="?"); v.add_argument("--deep", action="store_true"); v.add_argument("--online", action="store_true")
     r = sub.add_parser("run"); r.add_argument("model", nargs="?"); r.add_argument("-p","--prompt", default=None)
@@ -159,6 +194,9 @@ def build_cli():
     cd = sub.add_parser("code"); cd.add_argument("model", nargs="?"); cd.add_argument("--cwd", default=None)
     b = sub.add_parser("bench"); b.add_argument("model"); b.add_argument("-n","--tokens", type=int, default=128)
     i = sub.add_parser("install"); i.add_argument("target")
+    cn = sub.add_parser("connect"); cn.add_argument("platform")
+    pl = sub.add_parser("pull"); pl.add_argument("name"); pl.add_argument("--only", default=None)
+    rm = sub.add_parser("rm"); rm.add_argument("model")
     ct = sub.add_parser("ctx"); ct.add_argument("model")
     sv = sub.add_parser("serve"); sv.add_argument("--host", default="127.0.0.1"); sv.add_argument("--port", type=int, default=8686); sv.add_argument("--model", default=None)
     ag = sub.add_parser("agents"); ag.add_argument("action", nargs="?", default="list", choices=["list","install","launch"]); ag.add_argument("agent", nargs="?"); ag.add_argument("--model", default=None)
@@ -167,10 +205,19 @@ def build_cli():
     ex = sub.add_parser("export"); ex.add_argument("archive", nargs="?")
     md = sub.add_parser("model"); md.add_argument("name", nargs="?")
     sub.add_parser("config"); sub.add_parser("perms"); sub.add_parser("settings")
-    dp = sub.add_parser("doctor2")  # alias so doctor doesn't conflict
-    dp.add_argument("--deep", action="store_true")
     fx = sub.add_parser("fix"); fx.add_argument("--apply", action="store_true")
-    cg = sub.add_parser("chatgpt"); cg.add_argument("model", nargs="?")
+
+    # agent-connector wiring (start local server + point agent at it)
+    for _agent, _port in (("chatgpt", 8686), ("claude", 8687), ("opencode", 8688)):
+        _p = sub.add_parser(_agent)
+        _p.add_argument("model", nargs="?")
+        _p.add_argument("--port", type=int, default=_port)
+        _p.add_argument("--no-launch", action="store_true")
+    un = sub.add_parser("unconnect"); un.add_argument("target", nargs="?", default="all",
+                                                      choices=["all","chatgpt","claude","opencode"])
+
+    # stop running servers
+    st = sub.add_parser("stop"); st.add_argument("target", nargs="?")
 
     # computer use subcommands
     sc = sub.add_parser("click"); sc.add_argument("x", nargs="?", type=int); sc.add_argument("y", nargs="?", type=int)
@@ -253,17 +300,43 @@ try: sys.unraisablehook = _quiet_unraisable
 except Exception: pass
 
 # ─── portable data dir ─────────────────────────────────────────────────────
+def _app_dir() -> Path:
+    """Directory the app 'lives' in — the folder holding the executable when
+    frozen (PyInstaller), otherwise the folder holding cs.py.
+
+    Using sys.executable when frozen is essential: a PyInstaller onefile build
+    sets __file__ to a path inside its ephemeral extraction dir, so keying the
+    portable data folder off __file__ would put cs_data somewhere that is wiped
+    when the process exits.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _self_invoke(*args) -> list:
+    """Argv that re-invokes this app with a cs subcommand.
+
+    Frozen: the executable itself is the entrypoint, so just append args.
+    From source: run ``python cs.py <args>``.
+    """
+    argv = [str(a) for a in args]
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *argv]
+    return [sys.executable, str(Path(__file__).resolve()), *argv]
+
+
 def _find_data_home() -> Path:
     env = os.environ.get("CS_HOME")
     if env:
         return Path(env).expanduser().resolve()
-    here = Path(__file__).resolve().parent
+    here = _app_dir()
     portable = here / "cs_data"
     # Portable mode if PORTABLE marker exists or cs_data/ already in use
     if (here / "PORTABLE").exists() or (portable / "config.json").exists():
         portable.mkdir(parents=True, exist_ok=True)
         return portable
-    # Otherwise try to create it locally (running from writable dir)
+    # Otherwise try to create it next to the app (running from a writable dir)
     try:
         portable.mkdir(parents=True, exist_ok=True)
         t = portable / ".w"; t.write_text("x"); t.unlink()
@@ -464,16 +537,10 @@ DEFAULT_CONFIG = {
 CFG = jload(CONFIG_P, dict(DEFAULT_CONFIG))
 _SERVE = {"rec": None}
 
-# -- new settings defaults --
+# -- settings defaults --
 CFG.setdefault("prefs", {})
 CFG["prefs"].setdefault("auto_approve", True)
 CFG["prefs"].setdefault("auto_ctx", True)
-CFG["prefs"].setdefault("default_model", "")
-CFG.setdefault("global_installed", False)
-
-# -- new settings defaults --
-CFG.setdefault("prefs", {})
-CFG["prefs"].setdefault("auto_approve", True)
 CFG["prefs"].setdefault("default_model", "")
 CFG.setdefault("global_installed", False)
 
@@ -506,7 +573,21 @@ def fuzzy(q, s):
     if q in s: return True
     it = iter(s); return all(c in it for c in q)
 
+def _interactive() -> bool:
+    """True only when both stdin and stdout are real terminals.
+
+    Used to keep setup/prompts from blocking in CI, pipes, or the packaged
+    binary's smoke tests, where input() would hit EOF immediately.
+    """
+    try:
+        return bool(sys.stdin and sys.stdin.isatty()
+                    and sys.stdout and sys.stdout.isatty())
+    except Exception:
+        return False
+
 def ask(prompt, default=""):
+    if not _interactive():
+        return default
     try:
         s = input(prompt).strip()
         return s if s else default
@@ -2796,13 +2877,21 @@ def install_ollama():
 
 
 def install_self():
-    """Install the `cs` global command pointing at this cs.py."""
-    script = Path(__file__).resolve()
-    py = sys.executable
+    """Install the `cs` global command pointing at this app (script or exe)."""
+    if getattr(sys, "frozen", False):
+        # Packaged binary: the launcher just calls the executable directly.
+        exe = Path(sys.executable).resolve()
+        win_run = f'"{exe}"'
+        nix_run = f'exec "{exe}"'
+    else:
+        script = Path(__file__).resolve()
+        py = sys.executable
+        win_run = f'"{py}" "{script}"'
+        nix_run = f'exec "{py}" "{script}"'
     if os.name == "nt":
         BIN_D.mkdir(parents=True, exist_ok=True)
-        (BIN_D / "cs.cmd").write_text(f'@echo off\r\n"{py}" "{script}" %*\r\n', encoding="utf-8")
-        (BIN_D / "cs.ps1").write_text(f'& "{py}" "{script}" @args\r\n', encoding="utf-8")
+        (BIN_D / "cs.cmd").write_text(f'@echo off\r\n{win_run} %*\r\n', encoding="utf-8")
+        (BIN_D / "cs.ps1").write_text(f'& {win_run} @args\r\n', encoding="utf-8")
         print(GR + f"  v {BIN_D / 'cs.cmd'}" + RSTC)
         try:
             import winreg
@@ -2825,7 +2914,7 @@ def install_self():
         return
     BIN_D.mkdir(parents=True, exist_ok=True)
     launcher = BIN_D / "cs"
-    launcher.write_text(f'#!/usr/bin/env bash\nexec "{py}" "{script}" "$@"\n', encoding="utf-8")
+    launcher.write_text(f'#!/usr/bin/env bash\n{nix_run} "$@"\n', encoding="utf-8")
     try: os.chmod(launcher, 0o755)
     except Exception: pass
     print(GR + f"  v {launcher}" + RSTC)
@@ -2851,17 +2940,29 @@ def install_self():
 
 # ─── setup wizard ──────────────────────────────────────────────────────────
 def setup(full=False, quiet=False):
+    interactive = _interactive()
     if not quiet: show_logo("first-time setup")
     print(YL + "┌─ SETUP — hardware" + RSTC)
     info = probe()
     for k, v in info.items():
-        time.sleep(0.04); print(GR + "  [ OK ]" + RSTC, f"{k:8}", v)
+        if interactive and not quiet: time.sleep(0.04)
+        print(GR + "  [ OK ]" + RSTC, f"{k:8}", v)
     log(f"setup probe: {info}")
     print()
     print(CY + "▸ data location: " + RSTC + str(DATA_HOME))
     print(DIM + "  (copy this folder with cs.py to move everything)" + RSTC)
     print()
-    want = full or ask_yn("  install recommended runtimes?", default=True)
+    # Only install runtimes when explicitly asked (--full) or an interactive
+    # human confirms. A non-interactive first run (CI, pipe, packaged binary)
+    # must never hang on a prompt or trigger multi-hundred-MB pip installs.
+    if full:
+        want = True
+    elif interactive:
+        want = ask_yn("  install recommended runtimes?", default=True)
+    else:
+        want = False
+        print(DIM + "  (non-interactive — skipping runtime install; "
+              "run `cs install all` later)" + RSTC)
     if want:
         targets = (["all","llamacpp-bin","prism-fork"] if full
                    else ["llama-cpp","llamacpp-bin","transformers","sentencepiece","hub"])
@@ -2874,9 +2975,10 @@ def setup(full=False, quiet=False):
         recs = scan_models()
     print(GR + f"  v {len(recs)} artifact(s) indexed" + RSTC)
     print()
-    print(CY + "▸ global command" + RSTC)
-    if ask_yn("  install `cs` command?", default=True):
-        install_self()
+    if interactive:
+        print(CY + "▸ global command" + RSTC)
+        if ask_yn("  install `cs` command?", default=True):
+            install_self()
     CFG["setup_done"] = True; CFG["first_run_ts"] = time.time(); save_cfg()
     print()
     print(MG + "  setup complete — run `cs` to launch the chooser" + RSTC)
@@ -4701,19 +4803,25 @@ def cmd_ll_log(lines=80):
     except Exception as e: print(RD + "  " + str(e) + RSTC)
 
 def cmd_export(archive=None):
-    """Package cs.py + cs_data into a portable zip."""
-    here = Path(__file__).resolve().parent
+    """Package cs.py (when running from source) + cs_data into a portable zip."""
+    here = _app_dir()
+    frozen = getattr(sys, "frozen", False)
     if archive is None:
         archive = here / f"cs-portable-{_dt.date.today().isoformat()}.zip"
     archive = Path(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(Path(__file__).resolve(), "cs.py")
+        if not frozen:
+            z.write(Path(__file__).resolve(), "cs.py")
         for f in DATA_HOME.rglob("*"):
             if f.is_file() and not any(x in f.parts for x in ("tools","downloads","cache")):
                 try: z.write(f, str(Path("cs_data") / f.relative_to(DATA_HOME)))
                 except Exception: pass
     print(GR + f"  v wrote {archive}" + RSTC)
-    print(DIM + "  extract anywhere, run: python cs.py" + RSTC)
+    if frozen:
+        print(DIM + "  data only (running from a binary); ship the cs executable "
+              "alongside it." + RSTC)
+    else:
+        print(DIM + "  extract anywhere, run: python cs.py" + RSTC)
 
 # ─── selftest ──────────────────────────────────────────────────────────────
 def selftest():
@@ -4758,53 +4866,72 @@ def selftest():
     print(GR + f"  {passed} passed" + RSTC + (RD + f", {failed} failed" + RSTC if failed else ""))
     return 1 if failed else 0
 
+def cmd_platforms():
+    """List the remote API platforms you can connect and their status."""
+    print()
+    print("  " + BOLD + "connectable platforms" + RSTC)
+    connected = CFG.get("platforms", {})
+    for name in sorted(PLATFORM_DEFS):
+        d = PLATFORM_DEFS[name]
+        mark = (GR + "connected" + RSTC) if name in connected else (DIM + "—" + RSTC)
+        nokey = DIM + " (no key needed)" + RSTC if d.get("no_key") else ""
+        print(f"    {name:11} {DIM}{d.get('base_url',''):34}{RSTC} {mark}{nokey}")
+    print()
+    print(DIM + "  connect with:  cs connect <platform>" + RSTC)
+
+
 # ─── CLI ───────────────────────────────────────────────────────────────────
 def main():
-    ap = argparse.ArgumentParser(prog=APP, description=f"{APP_LONG} — portable model runner")
-    sub = ap.add_subparsers(dest="cmd")
-    sp = sub.add_parser("setup"); sp.add_argument("--full", action="store_true"); sp.add_argument("--quiet", action="store_true")
-    sub.add_parser("install-self")
-    fx = sub.add_parser("fix")
-    fx.add_argument("--apply", action="store_true")
-    sub.add_parser("scan"); sub.add_parser("list"); dp = sub.add_parser("doctor"); dp.add_argument("--deep", action="store_true")
-    sub.add_parser("selftest"); sub.add_parser("logo")
-    sub.add_parser("bonsai-setup"); sub.add_parser("ll-log")
-    v = sub.add_parser("verify"); v.add_argument("query", nargs="?"); v.add_argument("--deep", action="store_true"); v.add_argument("--online", action="store_true")
-    r = sub.add_parser("run"); r.add_argument("model", nargs="?"); r.add_argument("-p","--prompt", default=None)
-    c = sub.add_parser("chat"); c.add_argument("model", nargs="?"); c.add_argument("--incognito", action="store_true")
-    sub.add_parser("incognito").add_argument("model", nargs="?")
-    cd = sub.add_parser("code"); cd.add_argument("model", nargs="?"); cd.add_argument("--cwd", default=None)
-    b = sub.add_parser("bench"); b.add_argument("model"); b.add_argument("-n","--tokens", type=int, default=128)
-    i = sub.add_parser("install"); i.add_argument("target")
-    ct = sub.add_parser("ctx"); ct.add_argument("model")
-    sv = sub.add_parser("serve"); sv.add_argument("--host", default="127.0.0.1"); sv.add_argument("--port", type=int, default=8686); sv.add_argument("--model", default=None)
-    ag = sub.add_parser("agents"); ag.add_argument("action", nargs="?", default="list", choices=["list","install","launch"]); ag.add_argument("agent", nargs="?"); ag.add_argument("--model", default=None)
-    pi = sub.add_parser("plugin-init"); pi.add_argument("name")
-    cl = sub.add_parser("clean"); cl.add_argument("--downloads", action="store_true")
-    ex = sub.add_parser("export")
-    sub.add_parser("chatgpt").add_argument("model", nargs="?")
-    sub.add_parser("claude").add_argument("model", nargs="?")
-    sub.add_parser("opencode").add_argument("model", nargs="?"); ex.add_argument("archive", nargs="?")
+    ap = build_cli()
     a = ap.parse_args()
 
+    # commands that must work with zero prior setup and no TTY
+    if a.cmd == "version":
+        print(f"{APP_LONG} {VERSION} ({CODENAME})"); return
     if a.cmd == "install-self": install_self(); return
     if a.cmd == "logo": show_logo(); return
     if a.cmd == "selftest": sys.exit(selftest())
-    if a.cmd != "setup" and not CFG.get("setup_done"):
-        print(YL + "first launch — running setup" + RSTC); setup(); print()
-    if a.cmd is None: chooser(); return
+
+    # First-launch setup. Skipped for read-only commands that need no runtimes,
+    # and never blocks a non-interactive shell (CI / pipe / packaged binary).
+    _NO_SETUP = {"list", "scan", "doctor", "verify", "ll-log", "bonsai-setup",
+                 "config", "perms", "fix", "platforms", "ps", "clean",
+                 "plugin-init", "export", "install", "connect", "rm",
+                 "serve", "stop"}
+    if a.cmd not in (None, "setup") and a.cmd not in _NO_SETUP \
+            and not CFG.get("setup_done"):
+        if _interactive():
+            print(YL + "first launch — running setup" + RSTC); setup(); print()
+        else:
+            setup(quiet=True)
+    if a.cmd is None:
+        if not CFG.get("setup_done") and _interactive():
+            print(YL + "first launch — running setup" + RSTC); setup(); print()
+        chooser(); return
 
     if a.cmd == "setup": setup(a.full, a.quiet)
     elif a.cmd == "scan": cmd_scan()
     elif a.cmd == "list": cmd_list()
     elif a.cmd == "chatgpt":
-        cmd_chatgpt(a.model)
+        cmd_chatgpt(a.model, getattr(a, "port", 8686), getattr(a, "no_launch", False))
     elif a.cmd == "claude":
-        cmd_claude(a.model)
+        cmd_claude(a.model, getattr(a, "port", 8687), getattr(a, "no_launch", False))
     elif a.cmd == "opencode":
-        cmd_opencode(a.model)
+        cmd_opencode(a.model, getattr(a, "port", 8688), getattr(a, "no_launch", False))
     elif a.cmd == "unconnect":
         cmd_unconnect(a.target)
+    elif a.cmd == "connect":
+        install_target(a.platform)
+    elif a.cmd == "pull":
+        cmd_pull(a.name, getattr(a, "only", None))
+    elif a.cmd == "rm":
+        cmd_rm(a.model)
+    elif a.cmd == "ps":
+        cmd_ps()
+    elif a.cmd == "rig":
+        cmd_rig()
+    elif a.cmd == "platforms":
+        cmd_platforms()
     elif a.cmd == "menu":
         menu_main()
     elif a.cmd == "explore":
@@ -4861,7 +4988,7 @@ def main():
         cmd_run_agent(getattr(a, "agent", None), getattr(a, "model", None))
     elif a.cmd == "auto-ctx":
         cmd_auto_ctx(getattr(a, "value", None))
-    elif a.cmd == "doctor": cmd_doctor()
+    elif a.cmd == "doctor": cmd_doctor(getattr(a, "deep", False))
     elif a.cmd == "bonsai-setup": cmd_bonsai_setup()
     elif a.cmd == "ll-log": cmd_ll_log()
     elif a.cmd == "verify": cmd_verify(a.query, a.deep, a.online)
@@ -4884,8 +5011,9 @@ def main():
 
 
 # === CS-CANONICAL-BEGIN ===
-# Managed by repair scripts. Everything between the markers is regenerated.
-# Do not edit inside the markers; edits will be lost on the next repair.
+# TUI, computer-use, and coding-agent helpers.
+# (These markers are retained for reference; the file is now maintained by
+#  hand and covered by the test suite — edit freely.)
 
 # ---------- TUI helpers ----------
 def _vlen(s):
@@ -6324,7 +6452,6 @@ def _ensure_srv(port, model=None):
             if r.status == 200: return port
     except Exception:
         pass
-    script = Path(__file__).resolve()
     LOGS_D.mkdir(parents=True, exist_ok=True)
     log_path = LOGS_D / ("cs-serve-" + str(port) + ".log")
     env = os.environ.copy()
@@ -6334,10 +6461,10 @@ def _ensure_srv(port, model=None):
         fh = open(log_path, "w", encoding="utf-8", errors="replace")
     except Exception:
         fh = subprocess.DEVNULL
-    args = [sys.executable, str(script), "serve", "--port", str(port)]
+    args = _self_invoke("serve", "--port", str(port))
     if model: args += ["--model", model]
     proc = subprocess.Popen(args, stdout=fh, stderr=subprocess.STDOUT,
-                            cwd=str(script.parent), env=env)
+                            cwd=str(_app_dir()), env=env)
     for _ in range(120):
         time.sleep(0.5)
         if proc.poll() is not None:
