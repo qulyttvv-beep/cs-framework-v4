@@ -4,10 +4,16 @@
 #
 #   pyinstaller cs.spec
 #
-# Produces a single self-contained executable in dist/ named `cs`
-# (`cs.exe` on Windows). The framework is pure standard library, so the
-# binary is small — model runtimes (torch, transformers, llama.cpp, …) are
-# never bundled; they are installed on demand at runtime via `cs install`.
+# Produces ONE self-contained executable in dist/ — `cs` (`cs.exe` on
+# Windows). It contains the CLI, the server and the CS Studio desktop app
+# (its frontend is bundled from cs_studio/static). Double-clicking it opens
+# Studio; running it from a terminal gives the CLI.
+#
+# Model runtimes (torch, transformers, llama.cpp python bindings …) are never
+# bundled — GGUF models run through downloaded llama.cpp binaries and cloud
+# models through their APIs. Computer-use libraries (mss, pyautogui, Pillow)
+# ARE bundled when they are installed in the build environment.
+import os
 
 # Heavy / optional packages that must never be pulled into the binary even if
 # they happen to be present in the build environment.
@@ -15,17 +21,18 @@ EXCLUDES = [
     "torch", "transformers", "tokenizers", "accelerate", "safetensors",
     "llama_cpp", "onnxruntime", "vllm", "mlx", "mlx_lm", "sentencepiece",
     "tiktoken", "huggingface_hub", "hf_transfer", "einops",
-    "numpy", "scipy", "pandas", "matplotlib", "sklearn",
-    "PIL", "cv2", "mss", "pyautogui", "pytesseract",
+    "numpy", "scipy", "pandas", "matplotlib", "sklearn", "cv2",
     "tkinter", "PyQt5", "PyQt6", "PySide2", "PySide6",
-    "pytest", "IPython", "notebook",
+    "pytest", "IPython", "notebook", "playwright",
 ]
+
+ICON = "assets/cs.ico" if os.name == "nt" else ("assets/cs.icns" if os.path.exists("assets/cs.icns") and os.uname().sysname == "Darwin" else None)
 
 a = Analysis(
     ["cs.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[("cs_studio/static", "cs_studio/static")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -44,6 +51,7 @@ exe = EXE(
     a.datas,
     [],
     name="cs",
+    icon=ICON,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -43,8 +43,8 @@ import pathlib
 
 APP       = "cs"
 APP_LONG  = "CS Framework"
-VERSION   = "4.1.0"
-CODENAME  = "hex-4.1"
+VERSION   = "4.2.0"
+CODENAME  = "studio-4.2"
 
 
 # --- forced constants (repair patch) ---
@@ -91,6 +91,7 @@ if "PIP_TARGETS" not in globals():
         "sentencepiece":["sentencepiece", "protobuf"],
         "einops":       ["einops"],
         "tiktoken":     ["tiktoken"],
+        "computer":     ["mss", "pyautogui", "pillow"],
     }
 
 
@@ -102,6 +103,8 @@ if "TOOLS_SPEC" not in globals():
         "read":         '{"path":str,"offset":int=0,"limit":int=200} — read a text file',
         "write":        '{"path":str,"content":str} — overwrite (or create) a file',
         "append":       '{"path":str,"content":str} — append to a file',
+        "edit":         '{"path":str,"old":str,"new":str,"all":bool?} — replace exact text in a file',
+        "browse":       '{"url":str} — open a web page and return its readable text',
         "ls":           '{"path":str="."} — list a directory',
         "glob":         '{"pattern":str,"root":str="."} — glob for matching files',
         "grep":         '{"pattern":str,"root":str=".","glob":str="**/*"} — search file contents',
@@ -199,6 +202,7 @@ def build_cli():
     rm = sub.add_parser("rm"); rm.add_argument("model")
     ct = sub.add_parser("ctx"); ct.add_argument("model")
     sv = sub.add_parser("serve"); sv.add_argument("--host", default="127.0.0.1"); sv.add_argument("--port", type=int, default=8686); sv.add_argument("--model", default=None)
+    apc = sub.add_parser("studio"); apc.add_argument("--host", default="127.0.0.1"); apc.add_argument("--port", type=int, default=8799); apc.add_argument("--model", default=None); apc.add_argument("--no-open", action="store_true")
     ag = sub.add_parser("agents"); ag.add_argument("action", nargs="?", default="list", choices=["list","install","launch"]); ag.add_argument("agent", nargs="?"); ag.add_argument("--model", default=None)
     pi = sub.add_parser("plugin-init"); pi.add_argument("name")
     cl = sub.add_parser("clean"); cl.add_argument("--downloads", action="store_true")
@@ -956,16 +960,6 @@ def rec_from_dict(d):
                     d.get("expected_sha"), d.get("meta",{}) or {})
 
 # ─── scanner ───────────────────────────────────────────────────────────────
-def fetch_json(url, timeout=30):
-    req = urllib.request.Request(url, headers={"User-Agent": "cs/" + VERSION})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
-
-
-def fetch_text(url, timeout=30):
-    req = urllib.request.Request(url, headers={"User-Agent": "cs/" + VERSION})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8", errors="replace")
 
 
 def hf_search(q, limit=12):
@@ -1116,8 +1110,23 @@ def load_scan(rescan=False):
     return scan_models()
 
 def platform_records():
-    return [ModelRec(p, Path(p), "platform", 0, "remote-api", "platform")
-            for p in CFG.get("platforms", {})]
+    """One record per model of every connected API platform.
+
+    Records are named ``<platform>/<model>``; platforms connected before
+    model discovery existed (no ``models`` list) keep a single record named
+    after the platform, using its default model.
+    """
+    recs = []
+    for pid, pc in CFG.get("platforms", {}).items():
+        models = [m for m in (pc.get("models") or []) if m]
+        if not models:
+            recs.append(ModelRec(pid, Path(pid), "platform", 0, "remote-api", "platform",
+                                 meta={"platform": pid, "model": pc.get("model", "")}))
+            continue
+        for m in models:
+            recs.append(ModelRec(f"{pid}/{m}", Path(pid), "platform", 0, "remote-api",
+                                 "platform", meta={"platform": pid, "model": m}))
+    return recs
 
 # ─── verify ────────────────────────────────────────────────────────────────
 def sidecar_sha(p):
@@ -2022,19 +2031,31 @@ class OpenAIRT(BaseRuntime):
     def available(self):
         if self.pcfg.get("key") or self.pcfg.get("no_key"): return True, ""
         return False, f"cs connect {self.pname}"
-    def can_run(self, r): return r.kind == "platform" and r.name == self.pname
+    def can_run(self, r):
+        return r.kind == "platform" and (r.meta or {}).get("platform", r.name) == self.pname
     def stream(self, r, prompt, hist, ctx):
         msgs = list(hist) if hist else [{"role":"user","content":prompt}]
         if ctx.get("system"): msgs = [{"role":"system","content":ctx["system"]}] + msgs
-        body = json.dumps({"model": self.pcfg.get("model","gpt-4o-mini"),
+        model = (r.meta or {}).get("model") or self.pcfg.get("model") or "gpt-4o-mini"
+        body = json.dumps({"model": model,
                            "messages": msgs, "stream": True,
                            "temperature": float(ctx["temperature"]),
                            "max_tokens": int(ctx["max_new_tokens"])}).encode()
-        headers = {"Content-Type":"application/json"}
+        headers = {"Content-Type": "application/json", "User-Agent": f"{APP_LONG}/{VERSION}",
+                   "X-Title": APP_LONG}
         if self.pcfg.get("key"): headers["Authorization"] = "Bearer " + self.pcfg["key"]
         req = urllib.request.Request(self.pcfg["base_url"].rstrip("/") + "/chat/completions",
                                      data=body, headers=headers)
-        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+        try:
+            resp = urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:400]
+            try:
+                detail = json.loads(detail).get("error", {}).get("message") or detail
+            except Exception:
+                pass
+            raise RuntimeError(f"{self.pname} returned HTTP {e.code}: {detail}")
+        with resp:
             for raw in resp:
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line.startswith("data:"): continue
@@ -2762,10 +2783,27 @@ def cmd_agents(action="list", agent_id=None, model=None):
         return
 
 
+def _python_for_pip():
+    """Interpreter to run pip with. From source that's us; a frozen exe has no
+    pip of its own, so fall back to a Python on PATH (or None)."""
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    for name in ("python3", "python", "py"):
+        p = shutil.which(name)
+        if p:
+            return p
+    return None
+
+
 def install_target(t):
     print(CY + "▸ install " + RSTC + t)
     if t in PIP_TARGETS:
-        rc = subprocess.call([sys.executable,"-m","pip","install","--upgrade",*PIP_TARGETS[t]])
+        py = _python_for_pip()
+        if not py:
+            print(RD + "  x Python runtimes need a Python 3.9+ install (python.org); "
+                  "GGUF models work without it via `cs install llamacpp-bin`." + RSTC)
+            return
+        rc = subprocess.call([py, "-m", "pip", "install", "--upgrade", *PIP_TARGETS[t]])
         print((GR if rc == 0 else RD) + f"  {'v' if rc == 0 else 'x'} pip {t}" + RSTC); return
     if t == "all":
         for k in ("llama-cpp","transformers","torch","sentencepiece","einops","tiktoken","hub"):
@@ -3322,30 +3360,35 @@ def cmd_pull(name, only=None):
 
 
 def _find_serve_procs():
-    """Return list of dicts describing running cs serve processes."""
+    """Running `cs serve` / `cs studio` processes, from source or the exe."""
     procs = []
     try:
-        import subprocess as _sp
         if os.name == "nt":
-            r = _sp.run(["wmic", "process", "where", "name='python.exe'",
-                         "get", "ProcessId,CommandLine"],
-                        capture_output=True, text=True, timeout=10)
-            out = r.stdout or ""
+            ps = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match "
+                  "' (serve|studio)' } | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }")
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                               capture_output=True, text=True, timeout=20)
         else:
-            r = _sp.run(["ps", "-eo", "pid,args"], capture_output=True, text=True)
-            out = r.stdout or ""
+            r = subprocess.run(["ps", "-eo", "pid,args"],
+                               capture_output=True, text=True, timeout=10)
+        out = r.stdout or ""
+        me = os.getpid()
         for line in out.splitlines():
-            if "cs.py" not in line or " serve" not in line:
+            low = line.lower()
+            if not re.search(r"\s(serve|studio)(\s|$)", low):
                 continue
+            if "cs.py" not in low and not re.search(r"(^|[\\/ ])cs(\.exe)?\s", low):
+                continue
+            idm = re.match(r"\s*(\d+)", line)
+            if not idm or int(idm.group(1)) == me:
+                continue
+            studio = re.search(r"\sstudio(\s|$)", low) is not None
             pm = re.search(r"--port\s+(\d+)", line)
             mm = re.search(r"--model\s+(\S+)", line)
-            idm = re.search(r"(\d+)\s*$", line.strip())
-            if os.name != "nt":
-                idm = re.match(r"\s*(\d+)", line)
             procs.append({
-                "pid": idm.group(1) if idm else "?",
-                "port": pm.group(1) if pm else "?",
-                "model": mm.group(1) if mm else "(auto)",
+                "pid": idm.group(1),
+                "port": pm.group(1) if pm else ("8799" if studio else "8686"),
+                "model": mm.group(1) if mm else ("(studio)" if studio else "(auto)"),
             })
     except Exception:
         pass
@@ -3446,10 +3489,11 @@ def _handle_anthropic_messages(handler):
             "model": rec.name, "content":[{"type":"text","text":txt}],
             "stop_reason":"end_turn", "stop_sequence": None,
             "usage": {"input_tokens":0, "output_tokens": max(1, len(txt)//4)}}); return
+    handler.close_connection = True
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream")
     handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("Connection", "keep-alive")
+    handler.send_header("Connection", "close")
     handler.end_headers()
     def sse(ev, data):
         handler.wfile.write(("event: " + ev + "\n").encode())
@@ -3507,11 +3551,22 @@ class _ServeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b)))
         self.end_headers(); self.wfile.write(b)
 
+    def _html(self, code, s):
+        b = s.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers(); self.wfile.write(b)
+
     def _sse(self):
+        # No Content-Length is possible for a stream, so we must close the
+        # connection at the end to give the client a clean EOF (browsers and
+        # read-to-end clients both rely on this).
+        self.close_connection = True
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
         self.end_headers()
 
     def do_GET(self):
@@ -3521,10 +3576,23 @@ class _ServeHandler(BaseHTTPRequestHandler):
                              "data":[{"id":r.name,"object":"model"} for r in recs]})
         elif self.path == "/health":
             self._json(200, {"ok":True,"version":VERSION})
+        elif self.path.split("?")[0] in ("/", "/index.html"):
+            _studio_send_static(self, "index.html")
+        elif self.path.startswith("/static/"):
+            _studio_send_static(self, urllib.parse.unquote(self.path.split("?")[0][len("/static/"):]))
+        elif self.path.startswith("/api/"):
+            _app_get(self)
         else:
             self._json(404, {"error":"not found"})
 
     def do_POST(self):
+        if self.path.startswith("/api/"):
+            try:
+                ln = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(ln) or b"{}") if ln else {}
+            except Exception as e:
+                self._json(400, {"error": str(e)}); return
+            return _app_post(self, self.path.split("?")[0], body)
         if self.path.startswith("/v1/messages"):
             return _handle_anthropic_messages(self)
         if not self.path.startswith(("/v1/chat/completions","/v1/completions")):
@@ -3579,10 +3647,1493 @@ def cmd_serve(host, port, model=None):
     except KeyboardInterrupt: print(YL + "  ⌁ stopped" + RSTC)
     finally: srv.server_close()
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  CS Studio — the graphical app, served by the framework itself
+#  chat · artifacts · code workspace · browser · computer use · connectors
+#  (MCP) · routines · providers.   Frontend: cs_studio/static/
+# ═══════════════════════════════════════════════════════════════════════════
+APP_D          = DATA_HOME / "app"
+APP_CHATS_D    = APP_D / "chats"
+APP_ROUTINES_P = APP_D / "routines.json"
+APP_MCP_P      = APP_D / "mcp.json"
+DEMO_MODEL_ID  = "cs-echo"
+
+_STUDIO = {"token": None, "browse_token": None}
+_STREAMS = {}      # stream id -> {"cancel": bool}
+_APPROVALS = {}    # approval id -> {"event", "allow", "always"}
+_JOBS = {}         # job id -> job dict
+
+
+def _app_dirs():
+    for d in (APP_D, APP_CHATS_D):
+        try: d.mkdir(parents=True, exist_ok=True)
+        except Exception: pass
+
+
+# ── security: every /api call needs the session token, a local Host and a
+#    same-origin (or absent) Origin. This server can run shell commands, read
+#    and write files and drive the mouse, so a random web page must never be
+#    able to reach it (CSRF / DNS rebinding).
+def _studio_tokens():
+    if not _STUDIO["token"]:
+        import secrets
+        _STUDIO["token"] = os.environ.get("CS_STUDIO_TOKEN") or secrets.token_urlsafe(24)
+        _STUDIO["browse_token"] = secrets.token_urlsafe(18)
+    return _STUDIO["token"], _STUDIO["browse_token"]
+
+
+_LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+def _studio_host_ok(handler):
+    bound = handler.server.server_address[0]
+    if bound not in ("127.0.0.1", "::1", "localhost"):
+        return True                       # user explicitly exposed the server
+    host = (handler.headers.get("Host") or "").strip()
+    host = host[1:host.index("]")] if host.startswith("[") else host.split(":")[0]
+    return host.lower() in _LOOPBACK
+
+
+def _studio_origin_ok(handler):
+    origin = handler.headers.get("Origin")
+    if not origin:
+        return True
+    if origin == "null":
+        return False
+    try:
+        o = urllib.parse.urlparse(origin)
+    except Exception:
+        return False
+    bound = handler.server.server_address[0]
+    host_ok = (o.hostname or "").lower() in _LOOPBACK or bound not in _LOOPBACK
+    return host_ok and o.port == handler.server.server_port
+
+
+def _studio_authorized(handler, q=None):
+    import hmac
+    tok, _ = _studio_tokens()
+    got = handler.headers.get("X-CS-Token") or ((q or {}).get("t") or [""])[0]
+    return (bool(got) and hmac.compare_digest(str(got), tok)
+            and _studio_host_ok(handler) and _studio_origin_ok(handler))
+
+
+# ── static frontend (cs_studio/static) ───────────────────────────────────────
+_STATIC_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
+                 ".js": "application/javascript; charset=utf-8", ".svg": "image/svg+xml",
+                 ".png": "image/png", ".ico": "image/x-icon", ".json": "application/json",
+                 ".woff2": "font/woff2", ".webp": "image/webp"}
+
+_STUDIO_MISSING_HTML = ("<!doctype html><meta charset=utf-8><title>CS Studio</title>"
+                        "<body style='background:#1f1e1c;color:#ecebe6;font:15px system-ui;"
+                        "display:grid;place-items:center;height:100vh;margin:0'><div>"
+                        "<h2>CS Studio files not found</h2><p>The <code>cs_studio/</code> folder "
+                        "must sit next to <code>cs.py</code>. Use the release executable or the "
+                        "full repository.</p></div>")
+
+
+def _studio_static_dir():
+    cands = []
+    mei = getattr(sys, "_MEIPASS", None)
+    if mei:
+        cands.append(Path(mei) / "cs_studio" / "static")
+    cands.append(_app_dir() / "cs_studio" / "static")
+    try:
+        spec = importlib.util.find_spec("cs_studio")
+        if spec and spec.submodule_search_locations:
+            cands.append(Path(list(spec.submodule_search_locations)[0]) / "static")
+    except Exception:
+        pass
+    for c in cands:
+        if (c / "index.html").is_file():
+            return c
+    return None
+
+
+def _studio_send_static(handler, rel):
+    base = _studio_static_dir()
+    if not base:
+        return handler._html(200, _STUDIO_MISSING_HTML)
+    if not _studio_host_ok(handler):
+        return handler._json(403, {"error": "forbidden host"})
+    root = base.resolve()
+    p = (root / rel).resolve()
+    if root not in p.parents or not p.is_file():
+        return handler._json(404, {"error": "not found"})
+    data = p.read_bytes()
+    if rel == "index.html":
+        tok, btok = _studio_tokens()
+        data = (data.replace(b"__CS_TOKEN__", tok.encode())
+                    .replace(b"__CS_BROWSE_TOKEN__", btok.encode())
+                    .replace(b"__CS_VERSION__", VERSION.encode()))
+    handler.send_response(200)
+    handler.send_header("Content-Type", _STATIC_TYPES.get(p.suffix.lower(), "application/octet-stream"))
+    handler.send_header("Content-Length", str(len(data)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("X-Frame-Options", "DENY")
+    handler.send_header("Referrer-Policy", "no-referrer")
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+# ── models / runtimes ────────────────────────────────────────────────────────
+def _model_info_list():
+    out = []
+    try:
+        for r in load_scan():
+            rt = None
+            try: rt = pick_runtime(r)
+            except Exception: pass
+            arch = getattr(r, "arch", "") or ""
+            out.append({"id": r.name, "name": r.name, "kind": r.kind, "group": "Local",
+                        "arch": arch_disp(arch) if arch and arch != "?" else "",
+                        "size": human(getattr(r, "size", 0) or 0),
+                        "runtime": getattr(rt, "id", "") if rt else "",
+                        "ready": bool(rt), "local": True})
+    except Exception as e:
+        log(f"model_info: {e}", "warn")
+    names = {p["id"]: p["name"] for p in PROVIDERS}
+    for pid, pc in CFG.get("platforms", {}).items():
+        if pc.get("name"):
+            names.setdefault(pid, pc["name"])
+    for r in platform_records():
+        meta = r.meta or {}
+        pid = meta.get("platform", r.name)
+        out.append({"id": r.name, "name": meta.get("model") or r.name, "kind": "api",
+                    "group": names.get(pid, pid), "provider": pid,
+                    "free": bool((_prov(pid) or {}).get("free")) or str(meta.get("model", "")).endswith(":free"),
+                    "vision": _is_vision(meta.get("model") or r.name),
+                    "runtime": "api", "ready": True, "local": False})
+    out.append({"id": DEMO_MODEL_ID, "name": "CS Echo (demo)", "kind": "demo", "group": "Built-in",
+                "runtime": "builtin", "ready": True, "local": True})
+    return out
+
+
+def _runtime_info_list():
+    out = []
+    for rt in all_runtimes():
+        try: ok, detail = rt.available()
+        except Exception as e: ok, detail = False, str(e)
+        if getattr(rt, "id", "") == "openai-compat":
+            continue
+        out.append({"id": getattr(rt, "id", rt.__class__.__name__),
+                    "ok": bool(ok), "detail": detail or ""})
+    return out
+
+
+_VISION_HINTS = ("gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4", "gemini", "llama-4", "vision",
+                 "-vl", "pixtral", "grok", "gemma-3", "llava", "minicpm-v", "qwen2.5-vl")
+
+def _is_vision(model_id):
+    m = str(model_id or "").lower()
+    return any(h in m for h in _VISION_HINTS)
+
+
+# ── providers: OpenAI-compatible endpoints, many with genuine free tiers ─────
+PROVIDERS = [
+    {"id": "groq", "name": "Groq", "base_url": "https://api.groq.com/openai/v1",
+     "key_url": "https://console.groq.com/keys", "free": True,
+     "note": "Free tier. Very fast Llama, Qwen and GPT-OSS models.", "model": "llama-3.3-70b-versatile"},
+    {"id": "gemini", "name": "Google Gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+     "key_url": "https://aistudio.google.com/apikey", "free": True,
+     "note": "Free tier on AI Studio. Gemini Flash models, vision.", "model": "gemini-2.5-flash"},
+    {"id": "openrouter", "name": "OpenRouter", "base_url": "https://openrouter.ai/api/v1",
+     "key_url": "https://openrouter.ai/keys", "free": True,
+     "note": "Dozens of free ':free' models from many labs.", "model": "meta-llama/llama-3.3-70b-instruct:free"},
+    {"id": "cerebras", "name": "Cerebras", "base_url": "https://api.cerebras.ai/v1",
+     "key_url": "https://cloud.cerebras.ai", "free": True,
+     "note": "Free tier. Extremely fast inference.", "model": "llama-3.3-70b"},
+    {"id": "mistral", "name": "Mistral", "base_url": "https://api.mistral.ai/v1",
+     "key_url": "https://console.mistral.ai/api-keys", "free": True,
+     "note": "Free 'Experiment' plan, including Codestral.", "model": "mistral-small-latest"},
+    {"id": "github", "name": "GitHub Models", "base_url": "https://models.github.ai/inference",
+     "key_url": "https://github.com/settings/tokens", "free": True,
+     "note": "Free for prototyping with a GitHub token.", "model": "openai/gpt-4.1-mini"},
+    {"id": "huggingface", "name": "Hugging Face", "base_url": "https://router.huggingface.co/v1",
+     "key_url": "https://huggingface.co/settings/tokens", "free": True,
+     "note": "Monthly free inference credits.", "model": "meta-llama/Llama-3.3-70B-Instruct"},
+    {"id": "nvidia", "name": "NVIDIA NIM", "base_url": "https://integrate.api.nvidia.com/v1",
+     "key_url": "https://build.nvidia.com", "free": True,
+     "note": "Free developer credits.", "model": "meta/llama-3.3-70b-instruct"},
+    {"id": "sambanova", "name": "SambaNova", "base_url": "https://api.sambanova.ai/v1",
+     "key_url": "https://cloud.sambanova.ai/apis", "free": True,
+     "note": "Free tier.", "model": "Meta-Llama-3.3-70B-Instruct"},
+    {"id": "pollinations", "name": "Pollinations (no signup)", "base_url": "https://text.pollinations.ai/openai",
+     "key_url": "https://pollinations.ai", "free": True, "no_key": True, "opt_in": True,
+     "note": "Community-run, no account needed, rate-limited. Your messages are sent to pollinations.ai.",
+     "model": "openai"},
+    {"id": "openai", "name": "OpenAI", "base_url": "https://api.openai.com/v1",
+     "key_url": "https://platform.openai.com/api-keys", "free": False,
+     "note": "GPT models.", "model": "gpt-4o-mini"},
+    {"id": "deepseek", "name": "DeepSeek", "base_url": "https://api.deepseek.com/v1",
+     "key_url": "https://platform.deepseek.com/api_keys", "free": False,
+     "note": "Low-cost chat and reasoning models.", "model": "deepseek-chat"},
+    {"id": "together", "name": "Together AI", "base_url": "https://api.together.xyz/v1",
+     "key_url": "https://api.together.ai/settings/api-keys", "free": False,
+     "note": "Open models at scale.", "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo"},
+    {"id": "ollama", "name": "Ollama", "base_url": "http://localhost:11434/v1",
+     "key_url": "https://ollama.com/download", "free": True, "local": True, "no_key": True,
+     "note": "Local. Detected automatically when running.", "model": ""},
+    {"id": "lmstudio", "name": "LM Studio", "base_url": "http://localhost:1234/v1",
+     "key_url": "https://lmstudio.ai", "free": True, "local": True, "no_key": True,
+     "note": "Local. Detected automatically when running.", "model": ""},
+]
+
+_PROVIDER_FALLBACK_MODELS = {
+    "groq": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b", "openai/gpt-oss-120b"],
+    "gemini": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"],
+    "openrouter": ["meta-llama/llama-3.3-70b-instruct:free", "qwen/qwen3-coder:free",
+                   "deepseek/deepseek-chat-v3-0324:free"],
+    "cerebras": ["llama-3.3-70b", "qwen-3-32b", "gpt-oss-120b"],
+    "mistral": ["mistral-small-latest", "codestral-latest", "mistral-large-latest"],
+    "github": ["openai/gpt-4.1-mini", "openai/gpt-4.1"],
+    "huggingface": ["meta-llama/Llama-3.3-70B-Instruct", "Qwen/Qwen2.5-Coder-32B-Instruct"],
+    "nvidia": ["meta/llama-3.3-70b-instruct", "qwen/qwen2.5-coder-32b-instruct"],
+    "sambanova": ["Meta-Llama-3.3-70B-Instruct"],
+    "pollinations": ["openai", "mistral", "qwen-coder"],
+    "openai": ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1"],
+    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+    "together": ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
+}
+
+_NON_CHAT = ("embed", "whisper", "tts", "moderation", "dall-e", "image", "audio",
+             "transcribe", "rerank", "guard", "speech", "sdxl", "flux")
+
+
+def _prov(pid):
+    return next((p for p in PROVIDERS if p["id"] == pid), None)
+
+
+def _mask(k):
+    if not k: return ""
+    return (k[:4] + "…" + k[-4:]) if len(k) > 12 else "•" * 6
+
+
+def _http_json(url, headers=None, timeout=15):
+    h = {"User-Agent": f"{APP_LONG}/{VERSION}", "Accept": "application/json"}
+    h.update(headers or {})
+    req = urllib.request.Request(url, headers=h)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace") or "{}")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:240]
+        raise RuntimeError(f"HTTP {e.code}: {body}")
+
+
+def _fetch_models(base_url, key=None, pid=None, timeout=12):
+    h = {"Authorization": "Bearer " + key} if key else {}
+    d = _http_json(base_url.rstrip("/") + "/models", h, timeout=timeout)
+    items = d.get("data") if isinstance(d, dict) else d
+    if items is None and isinstance(d, dict):
+        items = d.get("models", [])
+    ids = []
+    for m in items or []:
+        mid = (m.get("id") or m.get("name")) if isinstance(m, dict) else str(m)
+        if not mid: continue
+        mid = mid[7:] if mid.startswith("models/") else mid
+        if any(b in mid.lower() for b in _NON_CHAT): continue
+        ids.append(mid)
+    if pid == "openrouter":
+        free = sorted(i for i in ids if i.endswith(":free"))
+        ids = free + sorted(i for i in ids if not i.endswith(":free"))[:60]
+    return list(dict.fromkeys(ids))[:250]
+
+
+def _provider_public():
+    plats = CFG.get("platforms", {})
+    out = []
+    for p in PROVIDERS:
+        pc = plats.get(p["id"]) or {}
+        out.append({**p, "connected": p["id"] in plats, "key_masked": _mask(pc.get("key", "")),
+                    "base_url": pc.get("base_url") or p["base_url"],
+                    "models": pc.get("models", []), "model": pc.get("model") or p.get("model", ""),
+                    "error": pc.get("error", "")})
+    for pid, pc in plats.items():
+        if not _prov(pid):
+            out.append({"id": pid, "name": pc.get("name") or pid, "base_url": pc.get("base_url", ""),
+                        "free": False, "custom": True, "note": "Custom OpenAI-compatible endpoint",
+                        "connected": True, "key_masked": _mask(pc.get("key", "")),
+                        "models": pc.get("models", []), "model": pc.get("model", ""),
+                        "error": pc.get("error", "")})
+    return out
+
+
+def _provider_connect(pid, key="", base_url="", name=""):
+    p = _prov(pid)
+    if not p:
+        if not base_url:
+            raise ValueError("a base URL is required for a custom endpoint")
+        pid = re.sub(r"[^a-z0-9-]+", "-", (name or pid or "custom").lower()).strip("-") or "custom"
+    base = (base_url or (p or {}).get("base_url") or "").rstrip("/")
+    old = CFG.get("platforms", {}).get(pid, {})
+    pc = {"base_url": base, "provider": pid}
+    if name and not p: pc["name"] = name
+    key = (key or "").strip() or old.get("key", "")
+    if key: pc["key"] = key
+    # keyless endpoints: catalog entries that need none, and custom/local
+    # servers connected without a key (vLLM, llama.cpp server, gateways)
+    if (p and p.get("no_key")) or (not key and (not p or p.get("local"))):
+        pc["no_key"] = True
+    if not key and not pc.get("no_key") and p:
+        raise ValueError("an API key is required for " + p["name"])
+    try:
+        models, err = _fetch_models(base, key or None, pid), ""
+    except Exception as e:
+        msg = str(e)
+        if re.search(r"HTTP 40[13]", msg):
+            raise ValueError("the key was rejected: " + msg[:160])
+        models, err = list(_PROVIDER_FALLBACK_MODELS.get(pid, [])), msg[:200]
+        if not p and not models:
+            raise ValueError("couldn't reach that endpoint: " + msg[:160])
+    default = (p or {}).get("model", "")
+    if not models and default:
+        models = [default]
+    pc["models"] = models
+    pc["model"] = default if default in models else (models[0] if models else "")
+    pc["error"] = err
+    CFG.setdefault("platforms", {})[pid] = pc
+    save_cfg()
+    return pid, pc
+
+
+_LOCAL_PROBE = {"ts": 0.0}
+
+def _autodetect_local():
+    """Auto-connect Ollama / LM Studio when they are running (no setup needed)."""
+    if time.time() - _LOCAL_PROBE["ts"] < 20:
+        return
+    _LOCAL_PROBE["ts"] = time.time()
+    for pid in ("ollama", "lmstudio"):
+        p = _prov(pid)
+        try:
+            models = _fetch_models(p["base_url"], None, pid, timeout=1.5)
+        except Exception:
+            continue
+        if not models:
+            continue
+        pc = CFG.setdefault("platforms", {}).get(pid) or {}
+        if pc.get("models") != models:
+            pc.update({"base_url": p["base_url"], "no_key": True, "models": models,
+                       "model": pc.get("model") if pc.get("model") in models else models[0],
+                       "provider": pid, "auto": True})
+            CFG["platforms"][pid] = pc
+            save_cfg()
+
+
+# ── chat / routine / mcp stores ──────────────────────────────────────────────
+def _routines_load(): return jload(APP_ROUTINES_P, [])
+def _routines_save(x): jsave(APP_ROUTINES_P, x)
+def _mcp_cfg_load(): return jload(APP_MCP_P, {"servers": []})
+def _mcp_cfg_save(c): jsave(APP_MCP_P, c)
+
+def _safe_id(cid):
+    return re.sub(r"[^A-Za-z0-9_-]", "", str(cid or ""))[:40]
+
+def _chats_list():
+    _app_dirs(); out = []
+    for p in sorted(APP_CHATS_D.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        d = jload(p, {})
+        out.append({"id": d.get("id", p.stem), "title": d.get("title", "Untitled"),
+                    "model": d.get("model", ""), "updated": p.stat().st_mtime,
+                    "kind": d.get("kind", "chat"), "n": len(d.get("messages", []))})
+    return out
+
+def _chat_load(cid):
+    _app_dirs(); return jload(APP_CHATS_D / (_safe_id(cid) + ".json"), None)
+
+def _chat_save(chat):
+    _app_dirs(); chat["id"] = _safe_id(chat.get("id")) or uuid.uuid4().hex[:10]
+    jsave(APP_CHATS_D / (chat["id"] + ".json"), chat)
+    return chat["id"]
+
+def _chat_delete(cid):
+    try: (APP_CHATS_D / (_safe_id(cid) + ".json")).unlink()
+    except Exception: pass
+
+
+_ART_RX = re.compile(r"```([\w.+-]*)[^\n]*\n([\s\S]*?)```")
+
+def _artifacts_list():
+    out = []
+    for c in _chats_list()[:200]:
+        chat = _chat_load(c["id"]) or {}
+        for mi, m in enumerate(chat.get("messages", [])):
+            if m.get("role") != "assistant":
+                continue
+            for ai, mt in enumerate(_ART_RX.finditer(m.get("content") or "")):
+                lang, code = (mt.group(1) or "text").lower(), mt.group(2)
+                if lang not in ("html", "htm", "svg", "xml") and code.count("\n") < 14:
+                    continue
+                t = re.search(r"(?is)<title>(.*?)</title>", code)
+                title = (t.group(1).strip() if t else "") or (
+                    code.strip().splitlines()[0][:60] if code.strip() else lang)
+                out.append({"chat_id": c["id"], "chat_title": c["title"], "lang": lang,
+                            "title": title, "code": code[:40000], "lines": code.count("\n") + 1,
+                            "updated": c["updated"], "key": f"{c['id']}:{mi}:{ai}"})
+                if len(out) >= 120:
+                    return out
+    return out
+
+
+# ── MCP: minimal stdio client (newline-delimited JSON-RPC 2.0) ───────────────
+class MCPClient:
+    def __init__(self, command, args=None, env=None):
+        self.command = command; self.args = list(args or [])
+        self.env = dict(env or {}); self.proc = None
+        self._id = 0; self._lock = threading.Lock(); self.tools = []
+
+    def start(self, timeout=25):
+        e = os.environ.copy(); e.update({k: str(v) for k, v in self.env.items()})
+        cmd = shutil.which(self.command) or self.command
+        self.proc = subprocess.Popen(
+            [cmd, *self.args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=e, text=True, bufsize=1,
+            encoding="utf-8", errors="replace")
+        self._rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                 "clientInfo": {"name": "cs-framework", "version": VERSION}},
+                  timeout=timeout)
+        self._notify("notifications/initialized")
+        res = self._rpc("tools/list", {}, timeout=timeout) or {}
+        self.tools = res.get("tools", [])
+        return self.tools
+
+    def _write(self, obj):
+        self.proc.stdin.write(json.dumps(obj) + "\n"); self.proc.stdin.flush()
+
+    def _notify(self, method, params=None):
+        self._write({"jsonrpc": "2.0", "method": method, "params": params or {}})
+
+    def _rpc(self, method, params=None, timeout=30):
+        with self._lock:
+            self._id += 1; rid = self._id
+            self._write({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                line = self.proc.stdout.readline()
+                if not line:
+                    if self.proc.poll() is not None:
+                        raise RuntimeError("MCP server exited")
+                    continue
+                try: msg = json.loads(line)
+                except Exception: continue
+                if msg.get("id") == rid:
+                    if "error" in msg: raise RuntimeError(str(msg["error"]))
+                    return msg.get("result")
+            raise TimeoutError("MCP timeout: " + method)
+
+    def call_tool(self, name, arguments, timeout=180):
+        res = self._rpc("tools/call", {"name": name, "arguments": arguments or {}},
+                        timeout=timeout) or {}
+        parts = [c.get("text", "") if c.get("type") == "text" else json.dumps(c)
+                 for c in res.get("content", [])]
+        return "\n".join(parts) if parts else json.dumps(res)
+
+    def stop(self):
+        try:
+            if self.proc: self.proc.terminate()
+        except Exception: pass
+
+
+_MCP_CLIENTS = {}
+
+def _mcp_get_client(server):
+    sid = server.get("id")
+    cl = _MCP_CLIENTS.get(sid)
+    if cl and cl.proc and cl.proc.poll() is None:
+        return cl
+    cl = MCPClient(server.get("command"), server.get("args"), server.get("env"))
+    cl.start(); _MCP_CLIENTS[sid] = cl
+    return cl
+
+def _mcp_all_tools(server_ids=None):
+    tools = []
+    for s in _mcp_cfg_load().get("servers", []):
+        if server_ids is not None and s.get("id") not in server_ids: continue
+        if not s.get("enabled", True): continue
+        try:
+            for t in _mcp_get_client(s).tools:
+                tools.append({"server": s.get("id"), "name": t.get("name"),
+                              "qualified": f"{s.get('id')}__{t.get('name')}",
+                              "description": t.get("description", ""),
+                              "schema": t.get("inputSchema", {})})
+        except Exception as e:
+            log(f"mcp {s.get('id')}: {e}", "warn")
+    return tools
+
+def _claude_desktop_mcp_path():
+    if os.name == "nt":
+        return Path(os.environ.get("APPDATA", str(Path.home()))) / "Claude" / "claude_desktop_config.json"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+
+def _mcp_import_claude_desktop():
+    p = _claude_desktop_mcp_path()
+    data = jload(p, None)
+    if not data:
+        raise FileNotFoundError(f"no Claude Desktop config at {p}")
+    cfg = _mcp_cfg_load(); have = {s["id"] for s in cfg.get("servers", [])}
+    added = []
+    for name, spec in (data.get("mcpServers") or {}).items():
+        sid = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-") or uuid.uuid4().hex[:6]
+        if sid in have or not spec.get("command"):
+            continue
+        cfg.setdefault("servers", []).append({"id": sid, "name": name, "command": spec["command"],
+                                              "args": spec.get("args", []), "env": spec.get("env", {}),
+                                              "enabled": True})
+        added.append(name)
+    _mcp_cfg_save(cfg)
+    return added
+
+MCP_GALLERY = [
+    {"id": "filesystem", "name": "Filesystem", "desc": "Read and write files in a folder you choose.",
+     "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "{folder}"], "needs": "folder"},
+    {"id": "memory", "name": "Memory", "desc": "A persistent knowledge graph the model can remember with.",
+     "command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"]},
+    {"id": "fetch", "name": "Fetch", "desc": "Fetch web pages and convert them to markdown.",
+     "command": "uvx", "args": ["mcp-server-fetch"]},
+    {"id": "git", "name": "Git", "desc": "Inspect and operate on a git repository.",
+     "command": "uvx", "args": ["mcp-server-git", "--repository", "{folder}"], "needs": "folder"},
+    {"id": "time", "name": "Time", "desc": "Current time and timezone conversion.",
+     "command": "uvx", "args": ["mcp-server-time"]},
+    {"id": "sequential-thinking", "name": "Sequential thinking", "desc": "Structured step-by-step reasoning.",
+     "command": "npx", "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]},
+]
+
+
+# ── code workspace: file system API sandboxed to the chosen project root ─────
+_FS_SKIP = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache",
+            ".pytest_cache", ".idea", ".next", ".DS_Store", ".tox", ".cache"}
+
+def _fs_resolve(root, rel=""):
+    r = Path(str(root or "")).expanduser()
+    if not str(root or "") or not r.is_absolute():
+        raise ValueError("project root must be an absolute path")
+    r = r.resolve()
+    p = (r / (rel or "")).resolve()
+    if p != r and r not in p.parents:
+        raise PermissionError("path is outside the project folder")
+    return r, p
+
+def _fs_list(root, rel=""):
+    r, p = _fs_resolve(root, rel)
+    if not p.is_dir():
+        raise NotADirectoryError(str(p))
+    out = []
+    for c in sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+        if c.name in _FS_SKIP:
+            continue
+        try: size = c.stat().st_size if c.is_file() else 0
+        except Exception: continue
+        out.append({"name": c.name, "path": c.relative_to(r).as_posix(), "dir": c.is_dir(), "size": size})
+        if len(out) >= 1000:
+            break
+    return out
+
+def _fs_read(root, rel):
+    _, p = _fs_resolve(root, rel)
+    if not p.is_file():
+        raise FileNotFoundError(rel)
+    size = p.stat().st_size
+    if size > 2_000_000:
+        return {"content": "", "size": size, "binary": True, "too_big": True}
+    raw = p.read_bytes()
+    if b"\x00" in raw[:8192]:
+        return {"content": "", "size": size, "binary": True}
+    return {"content": raw.decode("utf-8", "replace"), "size": size, "binary": False}
+
+def _fs_write(root, rel, content):
+    _, p = _fs_resolve(root, rel)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+    return p.stat().st_size
+
+def _fs_dirs(path=""):
+    """Directory picker: list sub-folders of an absolute path (read-only)."""
+    if not path:
+        roots = [str(Path.home())]
+        if os.name == "nt":
+            import string
+            roots += [f"{d}:\\" for d in string.ascii_uppercase if Path(f"{d}:\\").exists()]
+        else:
+            roots.append("/")
+        return {"path": "", "parent": None, "dirs": [{"name": r, "path": r} for r in roots]}
+    p = Path(path).expanduser().resolve()
+    dirs = []
+    try:
+        for c in sorted(p.iterdir(), key=lambda x: x.name.lower()):
+            if c.is_dir() and not c.name.startswith("."):
+                dirs.append({"name": c.name, "path": str(c)})
+    except Exception:
+        pass
+    parent = str(p.parent) if p.parent != p else None
+    return {"path": str(p), "parent": parent, "dirs": dirs[:500]}
+
+
+# ── built-in browser: fetch pages server-side and show them sandboxed ────────
+_BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+
+def _web_get(url, timeout=20, limit=6_000_000):
+    url = (url or "").strip()
+    if not re.match(r"^https?://", url, re.I):
+        url = "https://" + url
+    req = urllib.request.Request(url, headers={
+        "User-Agent": _BROWSER_UA, "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.geturl(), r.headers.get("Content-Type", ""), r.read(limit)
+
+def _decode_html(raw, ctype):
+    m = re.search(r"charset=([\w-]+)", ctype or "", re.I)
+    enc = m.group(1) if m else None
+    if not enc:
+        m2 = re.search(rb"<meta[^>]+charset=[\"']?([\w-]+)", raw[:4096], re.I)
+        enc = m2.group(1).decode("ascii", "ignore") if m2 else "utf-8"
+    try: return raw.decode(enc, "replace")
+    except LookupError: return raw.decode("utf-8", "replace")
+
+def _html_to_text(html_src):
+    import html as _h
+    t = re.search(r"(?is)<title[^>]*>(.*?)</title>", html_src)
+    title = _h.unescape(t.group(1)).strip() if t else ""
+    s = re.sub(r"(?is)<(script|style|noscript|svg|template|iframe)[^>]*>.*?</\1>", " ", html_src)
+    s = re.sub(r"(?is)<(nav|footer|aside)[^>]*>.*?</\1>", " ", s)
+    s = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</h[1-6]>|</li>|</tr>|</section>|</article>", "\n", s)
+    s = re.sub(r"(?i)<li[^>]*>", "\n• ", s)
+    s = re.sub(r"(?i)<h([1-6])[^>]*>", lambda m: "\n" + "#" * int(m.group(1)) + " ", s)
+    s = _h.unescape(re.sub(r"<[^>]+>", " ", s))
+    s = re.sub(r"[ \t\r\f\v]+", " ", s)
+    s = re.sub(r"\n[ ]+", "\n", s)
+    s = re.sub(r"\n{3,}", "\n\n", s).strip()
+    return title, s
+
+_BROWSE_SHIM = r"""<script>(function(){function go(u){try{parent.postMessage({cs:'nav',url:u},'*')}catch(e){}}
+document.addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;var h=a.getAttribute('href');if(!h||h.charAt(0)==='#'||/^(javascript|mailto|tel):/i.test(h))return;e.preventDefault();go(new URL(h,document.baseURI).href)},true);
+document.addEventListener('submit',function(e){var f=e.target;if((f.method||'get').toLowerCase()!=='get')return;e.preventDefault();var u=new URL(f.getAttribute('action')||document.baseURI,document.baseURI);new FormData(f).forEach(function(v,k){u.searchParams.set(k,v)});go(u.href)},true);
+function hi(){try{parent.postMessage({cs:'loaded',url:document.baseURI,title:document.title},'*')}catch(e){}}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',hi);else hi();})();</script>"""
+
+def _browse_response(handler, url):
+    from html import escape as _hesc
+    try:
+        final, ctype, raw = _web_get(url)
+    except Exception as e:
+        body = ("<!doctype html><meta charset=utf-8><body style='font:15px system-ui;padding:40px;"
+                "color:#333'><h3>Couldn't open this page</h3><p>" + _hesc(str(e)[:300]) + "</p>")
+        return _send_sandboxed(handler, body.encode("utf-8"), "text/html; charset=utf-8")
+    if "html" in (ctype or "").lower() or not ctype:
+        page = _decode_html(raw, ctype)
+        page = re.sub(r"(?is)<meta[^>]+http-equiv=[\"']?content-security-policy[^>]*>", "", page)
+        inject = '<base href="%s">%s' % (_hesc(final, quote=True), _BROWSE_SHIM)
+        if re.search(r"(?i)<head[^>]*>", page):
+            page = re.sub(r"(?i)(<head[^>]*>)", lambda m: m.group(1) + inject, page, count=1)
+        else:
+            page = inject + page
+        return _send_sandboxed(handler, page.encode("utf-8"), "text/html; charset=utf-8")
+    return _send_sandboxed(handler, raw, ctype)
+
+def _send_sandboxed(handler, data, ctype):
+    handler.send_response(200)
+    handler.send_header("Content-Type", ctype or "application/octet-stream")
+    handler.send_header("Content-Length", str(len(data)))
+    # a sandboxed, opaque origin even if opened directly: page scripts can
+    # never talk to this app's API
+    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+# ── extra agent tools: precise edits + readable browsing ─────────────────────
+def _t_edit(a, cwd=None):
+    path = a.get("path", "")
+    p = Path(path) if Path(path).is_absolute() else Path(cwd or ".") / path
+    old, new = a.get("old", ""), a.get("new", "")
+    if not p.is_file():
+        return "[edit: no such file " + str(p) + "]"
+    text = p.read_text(encoding="utf-8", errors="replace")
+    if not old:
+        return "[edit: 'old' must be the exact text to replace]"
+    n = text.count(old)
+    if n == 0:
+        return "[edit: 'old' text not found — read the file and copy it exactly]"
+    if n > 1 and not a.get("all"):
+        return f"[edit: 'old' text occurs {n} times — include more context or pass all:true]"
+    p.write_text(text.replace(old, new) if a.get("all") else text.replace(old, new, 1),
+                 encoding="utf-8")
+    return f"edited {p} ({n if a.get('all') else 1} replacement)"
+
+def _t_browse(a, cwd=None):
+    final, ctype, raw = _web_get(a.get("url", ""))
+    if "html" not in (ctype or "").lower():
+        return f"{final}\n[{ctype}, {len(raw)} bytes]\n" + raw[:4000].decode("utf-8", "replace")
+    title, text = _html_to_text(_decode_html(raw, ctype))
+    return f"# {title}\n{final}\n\n{text[:14000]}"
+
+TOOLS_IMPL.update({"edit": _t_edit, "browse": _t_browse})
+
+_TOOLSETS = {
+    "code": ["bash", "read", "write", "edit", "append", "ls", "glob", "grep", "tree",
+             "find", "diff", "wc", "python"],
+    "web": ["browse", "web_fetch", "http", "download"],
+    "computer": ["screen", "screen_size", "mouse_move", "mouse_click", "mouse_drag", "scroll",
+                 "key", "type", "window_list", "window_focus", "app_start", "sleep", "ocr",
+                 "clip_read", "clip_write"],
+}
+_APPROVAL_TOOLS = {"bash", "write", "append", "edit", "python", "download", "extract",
+                   "clip_write", "mouse_move", "mouse_click", "mouse_drag", "scroll",
+                   "key", "type", "app_start", "window_focus"}
+
+
+def _computer_status():
+    need = {"mss": "mss", "pyautogui": "pyautogui", "PIL": "pillow"}
+    missing = [pip for mod, pip in need.items() if importlib.util.find_spec(mod) is None]
+    return {"available": not missing, "missing": missing,
+            "frozen": bool(getattr(sys, "frozen", False)),
+            "ocr": importlib.util.find_spec("pytesseract") is not None and bool(shutil.which("tesseract"))}
+
+
+# ── jobs: long-running installs / downloads, run as `cs <subcommand>` ────────
+_PROGRESS_RX = re.compile(r"\d+(\.\d+)?%|[█▓▒░#]{4,}")
+
+def _job_start(title, steps, watch_dir=None):
+    jid = uuid.uuid4().hex[:8]
+    job = {"id": jid, "title": title, "status": "running", "log": [], "step": 0,
+           "steps": len(steps), "started": time.time(),
+           "watch_dir": str(watch_dir) if watch_dir else None}
+    _JOBS[jid] = job
+
+    def run():
+        try:
+            for i, argv in enumerate(steps):
+                job["step"] = i + 1
+                env = os.environ.copy()
+                env.update({"CS_NO_COLOR": "1", "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"})
+                proc = subprocess.Popen(_self_invoke(*argv), stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                        text=True, encoding="utf-8", errors="replace",
+                                        env=env, cwd=str(_app_dir()))
+                job["pid"] = proc.pid
+                for line in proc.stdout:
+                    line = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", line).rstrip()
+                    if not line.strip():
+                        continue
+                    if (_PROGRESS_RX.search(line) and job["log"]
+                            and _PROGRESS_RX.search(job["log"][-1])):
+                        job["log"][-1] = line[-240:]
+                    else:
+                        job["log"].append(line[-240:])
+                    job["log"] = job["log"][-200:]
+                rc = proc.wait()
+                if rc != 0:
+                    raise RuntimeError(f"step {i + 1} failed (exit {rc})")
+            job["status"] = "done"
+        except Exception as e:
+            job["status"], job["error"] = "error", str(e)
+        finally:
+            job["ended"] = time.time()
+            try: load_scan(rescan=True)
+            except Exception: pass
+
+    threading.Thread(target=run, daemon=True).start()
+    return job
+
+def _job_public(job):
+    j = {k: v for k, v in job.items() if k != "watch_dir"}
+    wd = job.get("watch_dir")
+    if wd and Path(wd).exists():
+        try: j["bytes"] = sum(f.stat().st_size for f in Path(wd).rglob("*") if f.is_file())
+        except Exception: pass
+    return j
+
+CODER_PRESETS = {
+    "small": {"repo": "bartowski/Qwen2.5-Coder-1.5B-Instruct-GGUF", "only": "*Q4_K_M.gguf",
+              "label": "Qwen2.5-Coder 1.5B", "size": "1.1 GB", "hint": "Runs on any laptop"},
+    "medium": {"repo": "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF", "only": "*Q4_K_M.gguf",
+               "label": "Qwen2.5-Coder 7B", "size": "4.7 GB", "hint": "8 GB+ RAM, good quality"},
+    "large": {"repo": "bartowski/Qwen2.5-Coder-14B-Instruct-GGUF", "only": "*Q4_K_M.gguf",
+              "label": "Qwen2.5-Coder 14B", "size": "9 GB", "hint": "16 GB+ RAM or a GPU"},
+}
+
+def _coder_setup(preset):
+    p = CODER_PRESETS.get(preset)
+    if not p:
+        raise ValueError("unknown preset")
+    steps = []
+    try:
+        have_server = LlamaServerRT().available()[0]
+    except Exception:
+        have_server = False
+    if not have_server:
+        steps.append(["install", "llamacpp-bin"])
+    steps.append(["pull", p["repo"], "--only", p["only"]])
+    steps.append(["scan"])
+    CFG.setdefault("prefs", {})["code_model_hint"] = p["repo"].split("/")[-1]
+    save_cfg()
+    return _job_start("Set up local coder · " + p["label"], steps,
+                      watch_dir=DL_D / "hf" / p["repo"].replace("/", "__"))
+
+
+# ── the agentic chat stream ──────────────────────────────────────────────────
+def _demo_reply(messages):
+    last = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last = str(m.get("content", "")); break
+    low = last.lower()
+    if re.search(r"\b(html|page|website|landing|artifact|ui)\b", low):
+        return ("Here's a small page to show how **artifacts** work. It opens in the panel on "
+                "the right, where you can switch between the live preview and the code.\n\n"
+                "```html\n<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+                "<title>Hello from CS</title>\n<style>\n  body { margin: 0; min-height: 100vh; "
+                "display: grid; place-items: center;\n         background: #1f1e1c; color: #ecebe6; "
+                "font: 16px Georgia, serif; }\n  .card { padding: 40px 48px; border: 1px solid "
+                "#3a3833; border-radius: 16px; text-align: center; }\n  h1 { font-weight: 400; "
+                "margin: 0 0 8px; }\n  button { margin-top: 20px; padding: 10px 18px; border: 0; "
+                "border-radius: 10px;\n           background: #c9794f; color: #fff; font: 600 14px "
+                "system-ui; cursor: pointer; }\n</style>\n</head>\n<body>\n  <div class=\"card\">\n"
+                "    <h1>Hello from CS</h1>\n    <p>Built by the demo model.</p>\n"
+                "    <button onclick=\"this.textContent='Clicked'\">Click me</button>\n  </div>\n"
+                "</body>\n</html>\n```\n\nThis is the built-in demo, so it can't really reason. "
+                "Connect a free provider in **Settings → Providers** or set up a local model to "
+                "get real answers.")
+    if re.search(r"\b(python|code|function|script)\b", low):
+        return ("A tiny example from the demo model:\n\n```python\ndef fib(n: int) -> list[int]:\n"
+                "    a, b, out = 0, 1, []\n    for _ in range(n):\n        out.append(a)\n"
+                "        a, b = b, a + b\n    return out\n\nprint(fib(10))\n```\n\n"
+                "For real coding help, open **Code** in the sidebar and set up a local coding "
+                "model, or connect a free cloud provider.")
+    return ("I'm **CS Echo**, the built-in demo model — I don't run a neural network, so I can "
+            "only echo. You said:\n\n> " + (last.replace("\n", "\n> ") or "…") + "\n\n"
+            "To get real answers:\n\n"
+            "- **Free cloud models** — Settings → Providers. Groq, Google Gemini and OpenRouter "
+            "all have free tiers; paste a key and every model shows up in the model menu.\n"
+            "- **Local models** — Code → *Set up local coder*, or `cs pull <hf-repo>`.\n"
+            "- **Ollama / LM Studio** — detected automatically when running.")
+
+def _demo_stream(messages):
+    for tok in re.findall(r"\s+|\S+", _demo_reply(messages)):
+        yield tok
+
+
+def _text_only(hist):
+    out = []
+    for m in hist:
+        c = m.get("content")
+        if isinstance(c, list):
+            c = "\n".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+        out.append({"role": m.get("role"), "content": c or ""})
+    return out
+
+
+def _prep_history(msgs, vision):
+    hist = []
+    for m in msgs:
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = str(m.get("content") or "")
+        images = []
+        for a in (m.get("attachments") or [])[:10]:
+            if a.get("type") == "image" and a.get("data_url"):
+                if vision:
+                    images.append(a["data_url"])
+                else:
+                    content += f"\n\n[image attached: {a.get('name', 'image')} — this model can't see images]"
+            elif a.get("type") == "text":
+                content += (f"\n\n<file name=\"{a.get('name', 'file')}\">\n"
+                            f"{str(a.get('content', ''))[:80000]}\n</file>")
+        if images and role == "user":
+            hist.append({"role": "user", "content": [{"type": "text", "text": content}]
+                         + [{"type": "image_url", "image_url": {"url": u}} for u in images]})
+        else:
+            hist.append({"role": role, "content": content})
+    return hist
+
+
+def _studio_system(ctx, tools, mcp_tools, cwd, mode):
+    now = _dt.datetime.now().strftime("%A, %d %B %Y")
+    base = (ctx.get("system") or "").strip()
+    parts = [f"You are CS, a capable, precise assistant running on {CS_USER}'s computer "
+             f"through CS Framework. Today is {now}."]
+    if base and base != DEFAULT_CONTEXT.get("system"):
+        parts.append(base)
+    if CFG.get("prefs", {}).get("artifacts", True):
+        parts.append("When you write a complete web page, SVG, or a substantial standalone "
+                     "program, put it in one fenced code block tagged with its language "
+                     "(```html, ```svg, ```python …). Web pages must be complete HTML documents.")
+    if mode == "code":
+        parts.append(f"You are working in the project folder {cwd}. Explore with ls/tree/grep "
+                     "and read files before changing them. Prefer 'edit' for small changes. "
+                     "Keep explanations short.")
+    if tools or mcp_tools:
+        desc = {t["name"]: t.get("desc", "") for t in TOOLS_SPEC}
+        desc.update({"edit": '{"path":str,"old":str,"new":str,"all":bool?} — replace exact text in a file',
+                     "browse": '{"url":str} — open a web page and return its readable text'})
+        lines = [f"- {n}: {desc.get(n, '')}" for n in tools if n in TOOLS_IMPL]
+        for t in mcp_tools:
+            props = json.dumps((t.get("schema") or {}).get("properties", {}))[:400]
+            lines.append(f"- {t['qualified']}: {t.get('description', '')[:300]} args={props}")
+        parts.append(
+            "You can use tools. To call one, reply with a single JSON object wrapped in "
+            "<tool>...</tool>, for example:\n<tool>{\"name\":\"read\",\"args\":{\"path\":\"README.md\"}}</tool>\n"
+            "Then stop and wait for the <tool_result>. Make one tool call at a time. When you "
+            "have what you need, answer normally without a <tool> block.\nTools:\n" + "\n".join(lines))
+    return "\n\n".join(parts)
+
+
+class _Cancelled(Exception):
+    pass
+
+
+def _studio_run_tool(name, args, cwd, enabled, mcp_tools, allowed_always, send, state):
+    mcp = next((t for t in mcp_tools if t["qualified"] == name or t["name"] == name), None)
+    if not mcp and name not in enabled:
+        return f"[tool '{name}' is not enabled]", None
+    needs = ((mcp is not None or name in _APPROVAL_TOOLS)
+             and CFG.get("prefs", {}).get("tool_approval", "ask") == "ask"
+             and name not in allowed_always)
+    if needs:
+        aid = uuid.uuid4().hex[:10]
+        ev = threading.Event()
+        _APPROVALS[aid] = {"event": ev, "allow": False, "always": False}
+        send({"type": "approval", "id": aid, "name": name, "args": args})
+        waited = 0.0
+        while not ev.wait(0.5):
+            waited += 0.5
+            if state["cancel"] or waited > 900:
+                break
+        info = _APPROVALS.pop(aid, {})
+        if state["cancel"]:
+            raise _Cancelled()
+        if not info.get("allow"):
+            return "[the user declined this tool call]", None
+        if info.get("always"):
+            allowed_always.add(name)
+    try:
+        if mcp:
+            srv = next((s for s in _mcp_cfg_load().get("servers", []) if s.get("id") == mcp["server"]), None)
+            if not srv:
+                return "[MCP server no longer configured]", None
+            return _mcp_get_client(srv).call_tool(mcp["name"], args), None
+        out = str(TOOLS_IMPL[name](args, cwd=cwd))
+    except Exception as e:
+        return f"[tool error: {e}]", None
+    image = None
+    if name == "screen":
+        m = re.search(r"screenshot:\s*(\S+\.png)", out)
+        if m and Path(m.group(1)).is_file():
+            image = m.group(1)
+    return out, image
+
+
+def _file_token_url(path):
+    tok, _ = _studio_tokens()
+    return "/api/file?path=" + urllib.parse.quote(str(path)) + "&t=" + tok
+
+
+def _app_chat_stream(handler, body):
+    model = body.get("model") or DEMO_MODEL_ID
+    raw_msgs = list(body.get("messages", []))
+    tools_cfg = body.get("tools") or {}
+    if isinstance(tools_cfg, bool):
+        tools_cfg = {"code": tools_cfg}
+    mode = body.get("mode") or "chat"
+    cwd = body.get("cwd") or str(Path.home())
+    sid = _safe_id(body.get("stream_id")) or uuid.uuid4().hex[:10]
+    state = _STREAMS[sid] = {"cancel": False}
+    handler._sse()
+
+    def send(ev):
+        handler.wfile.write(b"data: " + json.dumps(ev).encode() + b"\n\n")
+        handler.wfile.flush()
+
+    try:
+        send({"type": "start", "stream_id": sid})
+        if model == DEMO_MODEL_ID:
+            for tok in _demo_stream(raw_msgs):
+                if state["cancel"]: break
+                send({"type": "token", "text": tok}); time.sleep(0.006)
+            send({"type": "done", "stopped": state["cancel"]}); return
+
+        rec = match_model(model)
+        if not rec:
+            send({"type": "error", "error": f"Model not found: {model}"}); send({"type": "done"}); return
+        rt = pick_runtime(rec)
+        if not rt:
+            send({"type": "error", "error": f"No runtime can run {rec.name}. Open Settings → Models to install one."})
+            send({"type": "done"}); return
+        is_api = rec.kind == "platform"
+        vision = is_api and _is_vision((rec.meta or {}).get("model") or rec.name)
+        enabled = []
+        for key in ("code", "web", "computer"):
+            if tools_cfg.get(key):
+                enabled += [t for t in _TOOLSETS[key] if t in TOOLS_IMPL and t not in enabled]
+        mcp_ids = tools_cfg.get("mcp") or []
+        mcp_tools = _mcp_all_tools(mcp_ids) if mcp_ids else []
+        ctx = dict(get_context(rec))
+        if is_api and int(ctx.get("max_new_tokens", 512)) == int(DEFAULT_CONTEXT["max_new_tokens"]):
+            ctx["max_new_tokens"] = 4096
+        ctx["system"] = _studio_system(ctx, enabled, mcp_tools, cwd, mode)
+        hist = _prep_history(raw_msgs, vision)
+        allowed_always = set()
+        for _round in range(MAX_TOOL_ROUNDS):
+            buf = []
+            for c in rt.stream(rec, build_prompt(_text_only(hist), ctx),
+                               hist if is_api else _text_only(hist), ctx):
+                if state["cancel"]:
+                    break
+                buf.append(c)
+                send({"type": "token", "text": c})
+            text = "".join(buf)
+            hist.append({"role": "assistant", "content": text})
+            if state["cancel"] or not (enabled or mcp_tools):
+                break
+            calls = _TOOL_RX.findall(text)
+            if not calls:
+                break
+            for raw in calls[:3]:
+                try:
+                    call = json.loads(raw)
+                except Exception as e:
+                    hist.append({"role": "user", "content": f"<tool_result>[invalid tool JSON: {e}]</tool_result>"})
+                    continue
+                name = str(call.get("name", ""))
+                args = call.get("args") or {}
+                cid = uuid.uuid4().hex[:8]
+                send({"type": "tool_call", "id": cid, "name": name, "args": args})
+                result, image = _studio_run_tool(name, args, cwd, enabled, mcp_tools,
+                                                 allowed_always, send, state)
+                result = str(result)[:MAX_TOOL_OUTPUT]
+                send({"type": "tool_result", "id": cid, "name": name, "result": result,
+                      "image": _file_token_url(image) if image else None})
+                content = f"<tool_result name=\"{name}\">{result}</tool_result>"
+                if image and vision:
+                    b64 = base64.b64encode(Path(image).read_bytes()).decode()
+                    content = [{"type": "text", "text": content},
+                               {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64}}]
+                hist.append({"role": "user", "content": content})
+        send({"type": "done", "stopped": state["cancel"]})
+    except _Cancelled:
+        try: send({"type": "done", "stopped": True})
+        except Exception: pass
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        pass
+    except Exception as e:
+        log_exc("studio chat")
+        try:
+            send({"type": "error", "error": str(e)[:600]}); send({"type": "done"})
+        except Exception:
+            pass
+    finally:
+        _STREAMS.pop(sid, None)
+
+
+# ── routines scheduler ───────────────────────────────────────────────────────
+_APP_SCHED = {"stop": False, "thread": None}
+
+def _routine_due(r, now):
+    if not r.get("enabled", True): return False
+    last = r.get("last_run") or 0
+    every = r.get("every_minutes")
+    if every:
+        try: return (now - last) >= float(every) * 60
+        except Exception: return False
+    at = r.get("at_time")
+    if at and ":" in at:
+        lt = _dt.datetime.fromtimestamp(now)
+        try: hh, mm = [int(x) for x in at.split(":")[:2]]
+        except Exception: return False
+        return lt.hour == hh and lt.minute == mm and (now - last) > 55
+    return False
+
+def _routine_run(r):
+    model = r.get("model") or DEMO_MODEL_ID
+    prompt = r.get("prompt", "")
+    out = []
+    try:
+        if model == DEMO_MODEL_ID:
+            out = list(_demo_stream([{"role": "user", "content": prompt}]))
+        else:
+            rec = match_model(model); rt = pick_runtime(rec) if rec else None
+            if rec and rt:
+                ctx = get_context(rec)
+                hist = [{"role": "user", "content": prompt}]
+                for c in rt.stream(rec, build_prompt(hist, ctx), hist, ctx):
+                    out.append(c)
+            else:
+                out = ["[model unavailable]"]
+    except Exception as e:
+        out = ["[error: " + str(e) + "]"]
+    r["last_run"] = time.time(); r["last_output"] = "".join(out)[:6000]
+    r.setdefault("history", []).insert(0, {"ts": r["last_run"], "output": r["last_output"][:1500]})
+    r["history"] = r["history"][:10]
+    return r["last_output"]
+
+def _sched_loop():
+    while not _APP_SCHED["stop"]:
+        try:
+            items = _routines_load(); now = time.time(); changed = False
+            for r in items:
+                if _routine_due(r, now):
+                    log(f"routine run: {r.get('name')}"); _routine_run(r); changed = True
+            if changed: _routines_save(items)
+        except Exception as e:
+            log(f"sched: {e}", "warn")
+        for _ in range(30):
+            if _APP_SCHED["stop"]: break
+            time.sleep(1)
+
+def _start_scheduler():
+    if _APP_SCHED["thread"]: return
+    _APP_SCHED["stop"] = False
+    t = threading.Thread(target=_sched_loop, daemon=True); t.start()
+    _APP_SCHED["thread"] = t
+
+
+# ── JSON API ─────────────────────────────────────────────────────────────────
+def _local_server_ok():
+    try:
+        return bool(LlamaServerRT().available()[0])
+    except Exception:
+        return False
+
+
+def _q1(q, k, d=""):
+    return (q.get(k) or [d])[0]
+
+
+def _app_get(handler):
+    u = urllib.parse.urlparse(handler.path); path = u.path
+    q = urllib.parse.parse_qs(u.query)
+    if path == "/api/browse":
+        _, btok = _studio_tokens()
+        import hmac
+        if not (_studio_host_ok(handler) and hmac.compare_digest(_q1(q, "bt"), btok)):
+            return handler._json(403, {"error": "forbidden"})
+        return _browse_response(handler, _q1(q, "url", "about:blank"))
+    if not _studio_authorized(handler, q):
+        return handler._json(403, {"error": "forbidden"})
+    try:
+        return _app_get_routes(handler, path, q)
+    except (PermissionError, ValueError, FileNotFoundError, NotADirectoryError) as e:
+        return handler._json(400, {"error": str(e)})
+
+
+def _app_get_routes(handler, path, q):
+    if path == "/api/state":
+        _autodetect_local()
+        prefs = CFG.get("prefs", {})
+        return handler._json(200, {
+            "version": VERSION, "codename": CODENAME, "user": CS_USER,
+            "platform": sys.platform, "frozen": bool(getattr(sys, "frozen", False)),
+            "models": _model_info_list(), "runtimes": _runtime_info_list(),
+            "providers": _provider_public(), "prefs": prefs, "home": str(Path.home()),
+            "cwd": str(Path.cwd()), "demo_model": DEMO_MODEL_ID,
+            "computer": _computer_status(), "coder_presets": CODER_PRESETS,
+            "recent_projects": prefs.get("recent_projects", [])[:8],
+            "mcp_gallery": MCP_GALLERY, "claude_desktop_config": str(_claude_desktop_mcp_path()),
+            "local_server": _local_server_ok()})
+    if path == "/api/models":
+        return handler._json(200, {"models": _model_info_list()})
+    if path == "/api/providers":
+        return handler._json(200, {"providers": _provider_public()})
+    if path == "/api/context":
+        rec = match_model(_q1(q, "model"))
+        if not rec: return handler._json(404, {"error": "model not found"})
+        return handler._json(200, {"model": rec.name, "context": get_context(rec)})
+    if path == "/api/routines":
+        return handler._json(200, {"routines": _routines_load()})
+    if path == "/api/mcp":
+        return handler._json(200, _mcp_cfg_load())
+    if path == "/api/chats":
+        return handler._json(200, {"chats": _chats_list()})
+    if path.startswith("/api/chats/"):
+        c = _chat_load(path.rsplit("/", 1)[-1])
+        return handler._json(200 if c else 404, c or {"error": "not found"})
+    if path == "/api/artifacts":
+        return handler._json(200, {"artifacts": _artifacts_list()})
+    if path == "/api/fs/list":
+        return handler._json(200, {"entries": _fs_list(_q1(q, "root"), _q1(q, "path"))})
+    if path == "/api/fs/read":
+        return handler._json(200, _fs_read(_q1(q, "root"), _q1(q, "path")))
+    if path == "/api/fs/dirs":
+        return handler._json(200, _fs_dirs(_q1(q, "path")))
+    if path == "/api/reader":
+        final, ctype, raw = _web_get(_q1(q, "url"))
+        title, text = _html_to_text(_decode_html(raw, ctype)) if "html" in ctype.lower() else ("", "")
+        return handler._json(200, {"url": final, "title": title, "text": text[:60000]})
+    if path.startswith("/api/jobs/"):
+        job = _JOBS.get(path.rsplit("/", 1)[-1])
+        return handler._json(200 if job else 404, _job_public(job) if job else {"error": "not found"})
+    if path == "/api/jobs":
+        return handler._json(200, {"jobs": [_job_public(j) for j in _JOBS.values()]})
+    if path == "/api/file":
+        p = Path(_q1(q, "path")).resolve()
+        allowed = [_ensure_screen_dir().resolve(), APP_D.resolve()]
+        if not any(a in p.parents for a in allowed) or not p.is_file():
+            return handler._json(404, {"error": "not found"})
+        data = p.read_bytes()
+        handler.send_response(200)
+        handler.send_header("Content-Type", _STATIC_TYPES.get(p.suffix.lower(), "application/octet-stream"))
+        handler.send_header("Content-Length", str(len(data)))
+        handler.end_headers(); handler.wfile.write(data)
+        return
+    return handler._json(404, {"error": "not found"})
+
+
+def _app_post(handler, path, body):
+    if not _studio_authorized(handler):
+        return handler._json(403, {"error": "forbidden"})
+    try:
+        return _app_post_routes(handler, path, body)
+    except (PermissionError, ValueError, FileNotFoundError, NotADirectoryError,
+            RuntimeError, TimeoutError) as e:
+        return handler._json(400, {"error": str(e)})
+
+
+def _app_post_routes(handler, path, body):
+    if path == "/api/chat":
+        return _app_chat_stream(handler, body)
+    if path == "/api/chat/stop":
+        st = _STREAMS.get(_safe_id(body.get("stream_id")))
+        if st: st["cancel"] = True
+        return handler._json(200, {"ok": True})
+    if path == "/api/approve":
+        info = _APPROVALS.get(str(body.get("id")))
+        if not info:
+            return handler._json(404, {"error": "no such approval"})
+        info["allow"] = bool(body.get("allow")); info["always"] = bool(body.get("always"))
+        info["event"].set()
+        return handler._json(200, {"ok": True})
+    if path == "/api/context":
+        rec = match_model(body.get("model"))
+        if not rec: return handler._json(404, {"error": "model not found"})
+        ctx = get_context(rec); ctx.update(body.get("context", {})); set_context(rec, ctx)
+        return handler._json(200, {"ok": True, "context": ctx})
+    if path == "/api/prefs":
+        CFG.setdefault("prefs", {}).update(body.get("prefs", {})); save_cfg()
+        return handler._json(200, {"ok": True, "prefs": CFG["prefs"]})
+    if path == "/api/providers/connect":
+        pid, pc = _provider_connect(body.get("id", ""), body.get("key", ""),
+                                    body.get("base_url", ""), body.get("name", ""))
+        return handler._json(200, {"ok": True, "id": pid, "models": pc.get("models", []),
+                                   "warning": pc.get("error", "")})
+    if path == "/api/providers/disconnect":
+        CFG.get("platforms", {}).pop(str(body.get("id")), None); save_cfg()
+        return handler._json(200, {"ok": True})
+    if path == "/api/providers/refresh":
+        pid = str(body.get("id")); pc = CFG.get("platforms", {}).get(pid)
+        if not pc: return handler._json(404, {"error": "not connected"})
+        pc["models"] = _fetch_models(pc["base_url"], pc.get("key"), pid); pc["error"] = ""; save_cfg()
+        return handler._json(200, {"ok": True, "models": pc["models"]})
+    if path == "/api/scan":
+        load_scan(rescan=True)
+        return handler._json(200, {"ok": True, "models": _model_info_list()})
+    if path == "/api/routines":
+        items = _routines_load(); r = body.get("routine", {})
+        r["id"] = _safe_id(r.get("id")) or uuid.uuid4().hex[:8]
+        items = [x for x in items if x.get("id") != r["id"]] + [r]
+        _routines_save(items); return handler._json(200, {"ok": True, "routines": items})
+    if path == "/api/routines/run":
+        items = _routines_load()
+        for r in items:
+            if r.get("id") == body.get("id"):
+                out = _routine_run(r); _routines_save(items)
+                return handler._json(200, {"ok": True, "output": out, "routine": r})
+        return handler._json(404, {"error": "not found"})
+    if path == "/api/routines/delete":
+        items = [x for x in _routines_load() if x.get("id") != body.get("id")]
+        _routines_save(items); return handler._json(200, {"ok": True, "routines": items})
+    if path == "/api/mcp":
+        cfg = _mcp_cfg_load(); s = dict(body.get("server", {}))
+        if not s.get("command"): raise ValueError("command is required")
+        s["id"] = (_safe_id(s.get("id")) or
+                   re.sub(r"[^a-z0-9-]+", "-", (s.get("name") or "server").lower()).strip("-")
+                   or uuid.uuid4().hex[:6])
+        s.setdefault("enabled", True)
+        cfg["servers"] = [x for x in cfg.get("servers", []) if x.get("id") != s["id"]] + [s]
+        old = _MCP_CLIENTS.pop(s["id"], None)
+        if old: old.stop()
+        _mcp_cfg_save(cfg); return handler._json(200, {"ok": True, **cfg})
+    if path == "/api/mcp/delete":
+        cfg = _mcp_cfg_load(); sid = body.get("id")
+        cfg["servers"] = [x for x in cfg.get("servers", []) if x.get("id") != sid]
+        old = _MCP_CLIENTS.pop(sid, None)
+        if old: old.stop()
+        _mcp_cfg_save(cfg); return handler._json(200, {"ok": True, **cfg})
+    if path == "/api/mcp/tools":
+        try: return handler._json(200, {"tools": _mcp_all_tools(body.get("ids"))})
+        except Exception as e: return handler._json(200, {"tools": [], "error": str(e)})
+    if path == "/api/mcp/import":
+        return handler._json(200, {"ok": True, "added": _mcp_import_claude_desktop(), **_mcp_cfg_load()})
+    if path == "/api/chats":
+        cid = _chat_save(dict(body.get("chat", {})))
+        return handler._json(200, {"ok": True, "id": cid})
+    if path == "/api/chats/delete":
+        _chat_delete(body.get("id")); return handler._json(200, {"ok": True})
+    if path == "/api/fs/write":
+        size = _fs_write(body.get("root"), body.get("path"), str(body.get("content", "")))
+        return handler._json(200, {"ok": True, "size": size})
+    if path == "/api/project/open":
+        root = Path(str(body.get("root", ""))).expanduser()
+        if not root.is_absolute() or not root.is_dir():
+            raise ValueError("not a folder: " + str(root))
+        prefs = CFG.setdefault("prefs", {})
+        rec = [str(root.resolve())] + [p for p in prefs.get("recent_projects", []) if p != str(root.resolve())]
+        prefs["recent_projects"] = rec[:10]; save_cfg()
+        return handler._json(200, {"ok": True, "root": str(root.resolve()), "entries": _fs_list(str(root.resolve()))})
+    if path == "/api/setup/coder":
+        return handler._json(200, _job_public(_coder_setup(body.get("preset", "small"))))
+    if path == "/api/install":
+        target = str(body.get("target", ""))
+        if not re.match(r"^[\w.-]+$", target): raise ValueError("bad target")
+        return handler._json(200, _job_public(_job_start("Install " + target, [["install", target]])))
+    if path == "/api/pull":
+        repo = str(body.get("repo", "")).strip()
+        if not re.match(r"^[\w.-]+/[\w.-]+$", repo): raise ValueError("use the form owner/repo")
+        steps = [["pull", repo] + (["--only", str(body["only"])] if body.get("only") else []), ["scan"]]
+        return handler._json(200, _job_public(_job_start("Download " + repo, steps,
+                                                         watch_dir=DL_D / "hf" / repo.replace("/", "__"))))
+    if path == "/api/computer/screenshot":
+        out = _t_screen({})
+        m = re.search(r"screenshot:\s*(\S+\.png)", out)
+        if not m: return handler._json(400, {"error": out})
+        return handler._json(200, {"ok": True, "url": _file_token_url(m.group(1)), "path": m.group(1)})
+    return handler._json(404, {"error": "not found"})
+
+
+# ── desktop launch: a chromeless app window when possible ────────────────────
+def _find_app_browser():
+    names = []
+    if os.name == "nt":
+        pf = [os.environ.get(k, "") for k in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA")]
+        for base in pf:
+            if not base: continue
+            names += [Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+                      Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe",
+                      Path(base) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe"]
+    elif sys.platform == "darwin":
+        names += [Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+                  Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+                  Path("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
+                  Path("/Applications/Chromium.app/Contents/MacOS/Chromium")]
+    for n in names:
+        if n.is_file():
+            return str(n)
+    for n in ("microsoft-edge", "google-chrome", "google-chrome-stable", "chromium",
+              "chromium-browser", "brave-browser", "msedge", "chrome"):
+        p = shutil.which(n)
+        if p:
+            return p
+    return None
+
+
+def _open_app_window(url):
+    """Returns a Popen for a dedicated app window, or None."""
+    exe = _find_app_browser()
+    if not exe:
+        return None
+    profile = APP_D / "window-profile"
+    profile.mkdir(parents=True, exist_ok=True)
+    args = [exe, f"--app={url}", f"--user-data-dir={profile}", "--window-size=1280,860",
+            "--no-first-run", "--no-default-browser-check", "--disable-features=Translate"]
+    try:
+        return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        return None
+
+
+def _launched_from_desktop():
+    """True when the packaged app was double-clicked rather than run from a
+    terminal, so it should open the graphical app instead of the TUI."""
+    if not getattr(sys, "frozen", False):
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            ids = (ctypes.c_uint * 8)()
+            n = ctypes.windll.kernel32.GetConsoleProcessList(ids, 8)
+            # onefile = bootloader + app; a shell would make it 3 or more
+            return 0 < n <= 2
+        except Exception:
+            return False
+    return not _interactive()
+
+
+def _hide_console():
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)
+    except Exception:
+        pass
+
+
+def cmd_studio(host="127.0.0.1", port=8799, open_ui=True, model=None, hide_console=False):
+    _app_dirs(); _start_scheduler(); _studio_tokens()
+    if model:
+        rec = match_model(model)
+        if rec: _SERVE["rec"] = rec
+    try:
+        srv = _QuietHTTPServer((host, port), _ServeHandler)
+    except OSError:
+        url = f"http://{host}:{port}/"
+        print(YL + f"  CS Studio already running at {url}" + RSTC)
+        if open_ui and not _open_app_window(url):
+            import webbrowser; webbrowser.open(url)
+        return
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '') else host}:{port}/"
+    print(MG + "  CS Studio  " + RSTC + url)
+    print(DIM + "  chat · code · browser · artifacts · routines · connectors — Ctrl-C to quit" + RSTC)
+    window = None
+    if open_ui:
+        try:
+            import webview  # optional: pywebview gives a true native window
+            webview.create_window(APP_LONG, url, width=1280, height=860, min_size=(960, 620),
+                                  background_color="#1f1e1c")
+            webview.start()
+            _APP_SCHED["stop"] = True; srv.shutdown(); return
+        except Exception:
+            pass
+        window = _open_app_window(url)
+        if window and hide_console:
+            _hide_console()          # the app window is up; closing it quits
+        if not window:
+            try:
+                import webbrowser; webbrowser.open(url)
+            except Exception:
+                pass
+    started = time.time()
+    try:
+        while True:
+            time.sleep(1)
+            if window is not None and window.poll() is not None:
+                # A browser that exits within seconds handed the window to an
+                # already-running instance; keep serving. Otherwise the user
+                # closed the app window, so quit.
+                if time.time() - started > 8:
+                    break
+                window = None
+    except KeyboardInterrupt:
+        print(YL + "  ⌁ stopped" + RSTC)
+    finally:
+        _APP_SCHED["stop"] = True; srv.shutdown()
+
+
 # ─── commands ──────────────────────────────────────────────────────────────
 def match_model(q):
     if not q: return None
     recs = load_scan() + platform_records()
+    for r in recs:                      # exact id wins over fuzzy matching
+        if r.name == q:
+            return r
     hits = [r for r in recs if fuzzy(q, r.name) or fuzzy(q, str(r.path))]
     return hits[0] if hits else None
 
@@ -3700,36 +5251,6 @@ def cmd_bench(q, tokens=128):
     except Exception as e: print(RD + f"  x {e}" + RSTC); return
     dt = max(time.time()-t0, 1e-6)
     print(GR + f"  v ~{chars/4:.0f} tok in {dt:.1f}s = {chars/4/dt:.2f} tok/s" + RSTC)
-
-def _find_serve_procs():
-    procs = []
-    try:
-        if os.name == "nt":
-            r = subprocess.run(["wmic", "process", "where", "name='python.exe'",
-                                "get", "ProcessId,CommandLine"],
-                               capture_output=True, text=True, timeout=10)
-            out = r.stdout or ""
-        else:
-            r = subprocess.run(["ps", "-eo", "pid,args"],
-                               capture_output=True, text=True, timeout=10)
-            out = r.stdout or ""
-        for line in out.splitlines():
-            if "cs.py" not in line or " serve" not in line:
-                continue
-            pm = re.search(r"--port\s+(\d+)", line)
-            mm = re.search(r"--model\s+(\S+)", line)
-            idm = re.search(r"(\d+)\s*$", line.strip())
-            if os.name != "nt":
-                idm = re.match(r"\s*(\d+)", line)
-            procs.append({
-                "pid": idm.group(1) if idm else "?",
-                "port": pm.group(1) if pm else "?",
-                "model": mm.group(1) if mm else "(auto)",
-            })
-    except Exception:
-        pass
-    return procs
-
 
 def _hr():
     print(DIM + "  " + "-" * 62 + RSTC)
@@ -4121,25 +5642,6 @@ def menu_servers():
             return
         if c == "k":
             cmd_stop()
-
-
-def cmd_stop():
-    procs = _find_serve_procs()
-    if not procs:
-        print(DIM + "  no running servers" + RSTC)
-        return
-    killed = 0
-    for p in procs:
-        try:
-            if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", p["pid"], "/F"],
-                               capture_output=True, timeout=5)
-            else:
-                os.kill(int(p["pid"]), 15)
-            killed += 1
-        except Exception:
-            pass
-    print(GR + "  v stopped " + str(killed) + " server(s)" + RSTC)
 
 
 _DEFINE_RX = re.compile(r"<define_tool>\s*(\{.*?\})\s*</define_tool>", re.S)
@@ -4897,7 +6399,7 @@ def main():
     _NO_SETUP = {"list", "scan", "doctor", "verify", "ll-log", "bonsai-setup",
                  "config", "perms", "fix", "platforms", "ps", "clean",
                  "plugin-init", "export", "install", "connect", "rm",
-                 "serve", "stop"}
+                 "serve", "stop", "studio"}
     if a.cmd not in (None, "setup") and a.cmd not in _NO_SETUP \
             and not CFG.get("setup_done"):
         if _interactive():
@@ -4905,6 +6407,8 @@ def main():
         else:
             setup(quiet=True)
     if a.cmd is None:
+        if _launched_from_desktop():
+            cmd_studio(hide_console=True); return
         if not CFG.get("setup_done") and _interactive():
             print(YL + "first launch — running setup" + RSTC); setup(); print()
         chooser(); return
@@ -4951,7 +6455,7 @@ def main():
     elif a.cmd == "agent":
         cmd_cs_agent()
     elif a.cmd == "stop":
-        cmd_stop()
+        cmd_stop(getattr(a, "target", None))
     elif a.cmd == "screen":
         cmd_screen()
     elif a.cmd == "click":
@@ -5003,6 +6507,7 @@ def main():
         if rec: edit_context(rec)
         else: print(RD + f"no match: {a.model}" + RSTC)
     elif a.cmd == "serve": cmd_serve(a.host, a.port, a.model)
+    elif a.cmd == "studio": cmd_studio(a.host, a.port, not getattr(a, "no_open", False), a.model)
     elif a.cmd == "agents": cmd_agents(a.action, a.agent, a.model)
     elif a.cmd == "plugin-init": cmd_plugin_init(a.name)
     elif a.cmd == "clean": cmd_clean(a.downloads)

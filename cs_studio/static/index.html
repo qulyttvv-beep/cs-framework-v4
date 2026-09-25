@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="cs-token" content="__CS_TOKEN__">
+<meta name="cs-bt" content="__CS_BROWSE_TOKEN__">
+<meta name="color-scheme" content="dark light">
+<title>CS</title>
+<link rel="icon" type="image/png" href="/static/favicon.png">
+<link rel="stylesheet" href="/static/studio.css?v=__CS_VERSION__">
+<script>
+  /* apply the saved theme before first paint to avoid a flash */
+  (function () {
+    try {
+      var t = localStorage.getItem("cs.theme") || "dark";
+      if (t === "system") t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", t);
+      var a = localStorage.getItem("cs.accent");
+      if (a) document.documentElement.style.setProperty("--accent", a);
+    } catch (e) {}
+  })();
+</script>
+</head>
+<body>
+<div id="splash"><img src="/static/icon.png" alt=""></div>
+<div class="app" id="app">
+  <aside class="side" id="side"></aside>
+  <main class="main">
+    <header class="top" id="top"></header>
+    <div class="views" id="views"></div>
+  </main>
+</div>
+<aside class="art-panel" id="art"></aside>
+<div id="layer"></div>
+<div class="toasts" id="toasts"></div>
+<input type="file" id="file-in" multiple hidden>
+<script src="/static/studio.js?v=__CS_VERSION__"></script>
+</body>
+</html>

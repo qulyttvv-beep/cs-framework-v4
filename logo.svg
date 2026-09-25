@@ -1,32 +1,66 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="-120 -120 240 240"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-128 -128 256 256"
      width="512" height="512" role="img" aria-label="CS Framework">
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%"   stop-color="#00d4ff"/>
-      <stop offset="50%"  stop-color="#5b8fff"/>
-      <stop offset="100%" stop-color="#ff44cc"/>
+    <!-- top face: bright cyan -> blue -->
+    <linearGradient id="fTop" x1="0" y1="-100" x2="0" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#5eead4"/>
+      <stop offset="55%"  stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
     </linearGradient>
-    <radialGradient id="bg" cx="0.5" cy="0.5" r="0.7">
-      <stop offset="0%"   stop-color="#0b1220" stop-opacity="0.9"/>
-      <stop offset="100%" stop-color="#0b1220" stop-opacity="0"/>
+    <!-- left face: indigo (shadow side) -->
+    <linearGradient id="fLeft" x1="-86.6" y1="-50" x2="0" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#4f46e5"/>
+      <stop offset="100%" stop-color="#3730a3"/>
+    </linearGradient>
+    <!-- right face: violet -> fuchsia -->
+    <linearGradient id="fRight" x1="86.6" y1="-50" x2="0" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#c026d3"/>
+    </linearGradient>
+    <!-- rim -->
+    <linearGradient id="rim" x1="0" y1="-110" x2="0" y2="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#5eead4"/>
+      <stop offset="50%"  stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#d946ef"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.42" r="0.62">
+      <stop offset="0%"   stop-color="#38bdf8" stop-opacity="0.20"/>
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
     </radialGradient>
   </defs>
 
-  <!-- soft background glow -->
-  <circle cx="0" cy="0" r="110" fill="url(#bg)"/>
+  <!-- soft, theme-neutral glow -->
+  <circle cx="0" cy="0" r="120" fill="url(#glow)"/>
 
-  <g fill="none" stroke="url(#g)" stroke-width="6"
-     stroke-linejoin="round" stroke-linecap="round">
+  <!-- three cube faces (isometric prism) -->
+  <g stroke-linejoin="round" stroke-linecap="round">
+    <!-- top face -->
+    <path d="M0,-100 L86.6,-50 L0,0 L-86.6,-50 Z"
+          fill="url(#fTop)" stroke="#a5f3fc" stroke-width="2" stroke-opacity="0.55"/>
+    <!-- left face -->
+    <path d="M-86.6,-50 L0,0 L0,100 L-86.6,50 Z"
+          fill="url(#fLeft)" stroke="#0b1220" stroke-width="2" stroke-opacity="0.18"/>
+    <!-- right face -->
+    <path d="M86.6,-50 L86.6,50 L0,100 L0,0 Z"
+          fill="url(#fRight)" stroke="#0b1220" stroke-width="2" stroke-opacity="0.18"/>
 
-    <!-- outer hexagon: vertices at 12, 2, 4, 6, 8, 10 o'clock -->
-    <!-- R = 100, R*cos(30deg) ~= 86.6, R/2 = 50 -->
-    <polygon points="0,-100 86.6,-50 86.6,50 0,100 -86.6,50 -86.6,-50"/>
+    <!-- inner creases (the Y) for crisp edges -->
+    <g stroke="#e0f2fe" stroke-width="2.5" stroke-opacity="0.35" fill="none">
+      <line x1="0" y1="0" x2="0"     y2="100"/>
+      <line x1="0" y1="0" x2="86.6"  y2="-50"/>
+      <line x1="0" y1="0" x2="-86.6" y2="-50"/>
+    </g>
 
-    <!-- inner cube edges: center to top-right, top-left, bottom -->
-    <line x1="0" y1="0" x2="86.6"  y2="-50"/>
-    <line x1="0" y1="0" x2="-86.6" y2="-50"/>
-    <line x1="0" y1="0" x2="0"     y2="100"/>
+    <!-- outer hexagon rim -->
+    <polygon points="0,-100 86.6,-50 86.6,50 0,100 -86.6,50 -86.6,-50"
+             fill="none" stroke="url(#rim)" stroke-width="6"/>
+  </g>
 
+  <!-- corner node accents -->
+  <g fill="#e0f2fe">
+    <circle cx="0"     cy="-100" r="6"/>
+    <circle cx="86.6"  cy="-50"  r="5" fill="#c4b5fd"/>
+    <circle cx="-86.6" cy="-50"  r="5" fill="#a5f3fc"/>
   </g>
 </svg>

@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+import cs
+
 
 def _free_port() -> int:
     s = socket.socket()
@@ -24,13 +26,13 @@ def _free_port() -> int:
 def test_version_flag(run_cli):
     r = run_cli("--version")
     assert r.returncode == 0
-    assert "4.1.0" in r.stdout
+    assert cs.VERSION in r.stdout
 
 
 def test_version_subcommand(run_cli):
     r = run_cli("version")
     assert r.returncode == 0
-    assert "CS Framework" in r.stdout and "4.1.0" in r.stdout
+    assert "CS Framework" in r.stdout and cs.VERSION in r.stdout
 
 
 def test_help_lists_many_commands(run_cli):
@@ -114,7 +116,7 @@ def test_serve_health_and_models(cs_script: Path, tmp_path: Path):
             except Exception:
                 time.sleep(0.4)
         assert health and health.get("ok") is True, "no /health response:\n" + _log()
-        assert health.get("version") == "4.1.0"
+        assert health.get("version") == cs.VERSION
 
         with urllib.request.urlopen(base + "/v1/models", timeout=5) as fh:
             models = json.loads(fh.read().decode())
