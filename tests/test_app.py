@@ -8,6 +8,7 @@ import contextlib
 import json
 import os
 import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -68,10 +69,16 @@ class _Mock(BaseHTTPRequestHandler):
         self.wfile.write(b"data: [DONE]\n\n")
 
 
+class _MockServer(ThreadingHTTPServer):
+    def server_bind(self):          # skip the slow reverse-DNS lookup (macOS)
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 @pytest.fixture(scope="module")
 def mock_openai():
     port = _free_port()
-    srv = ThreadingHTTPServer(("127.0.0.1", port), _Mock)
+    srv = _MockServer(("127.0.0.1", port), _Mock)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{port}/v1"
     srv.shutdown()
